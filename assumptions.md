@@ -31,3 +31,25 @@ sees `{ mfaRequired }` or a thrown `CarrierError`.
 
 Carriers throw typed errors (`errors.ts`). The server catches and maps to a status code.
 Happy-path return types stay clean.
+
+## Allstate (validated 2026-06-19)
+
+Validated end to end once: a real account on a Browserbase residential proxy, login
+→ MFA → authenticated dashboard. This is a feasibility proof (n=1), not a reliability
+guarantee. We can only test against the accounts we have.
+
+Tested, works:
+- Login via the **Email** tab: `#emailAddress` + `input[type=password]:visible`, submit `button[name=frmButton]:visible`.
+- Credentialed login reached MFA from both a datacenter IP and a residential proxy. Not blocked.
+- MFA: delivery-method page, SMS option, code field `#pinCode` (tel), submit → `/secured/home`.
+
+Assumed, not tested (likely to vary per user):
+- User logs in by email, not a User ID. User-ID-only accounts need the other tab.
+- MFA is always required and SMS is offered. Trusted-device (no MFA) and email-only delivery untested.
+- Account has exactly one policy. Multiple/none, and first-login interstitials, untested.
+- No captcha appeared. Anti-bot is probabilistic; a flagged proxy IP could trigger one. No captcha handling yet.
+- Documents location: under the Policies nav, not yet mapped.
+
+How the real carrier copes: detect state, do not assume. Race the login outcomes
+(dashboard / MFA / error / captcha) and read the MFA options offered rather than
+hardcoding SMS. Map anything unknown to a typed `CarrierError` so it fails cleanly.

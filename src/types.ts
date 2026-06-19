@@ -23,6 +23,8 @@ export type ErrorResponse = { error: string };
 // ---- internal session state machine ----
 
 export type SessionState =
+    | "WARMING"
+    | "WARM"
     | "LOGGING_IN"
     | "AWAITING_MFA"
     | "SUBMITTING_MFA"
@@ -34,6 +36,12 @@ export type SessionState =
 
 export interface Carrier {
     readonly name: string;
+    // the Browserbase context this carrier used (created on first login, or one
+    // handed in for reuse). The server saves it to skip MFA on a repeat run.
+    readonly contextId: string | undefined;
+    // open the browser and load the login form, no credentials yet. Optional to
+    // call ahead of login() to pre-warm while the user is still typing.
+    prepare(): Promise<void>;
     // start the login. returns whether the portal then asks for an MFA code.
     login(username: string, password: string): Promise<{ mfaRequired: boolean }>;
     // type the MFA code the user received.

@@ -1,48 +1,82 @@
 import express from "express";
-import type { Response } from "express";
 import { randomUUID } from "node:crypto";
-import type { Carrier, SessionState } from "./types.js";
-import { MockCarrier } from "./carriers/mock.js";
+import type { LoginResponse, MfaResponse } from "./types.js";
+import { carriers } from "./carriers/registry.js";
 import {
-    CarrierError,
-    InvalidCredentialsError,
-    InvalidMfaError,
-    AntiBotError,
-    CarrierTimeoutError,
-    DocumentsUnavailableError,
-} from "./errors.js";
+    type Session,
+    sessions,
+    contexts,
+    BusyError,
+    withLock,
+    fetchAndFinish,
+    cleanup,
+    startReaper,
+} from "./sessions.js";
+import { requireStrings, sendError } from "./http.js";
 
 const app = express();
 app.use(express.json());
 app.use(express.static("public")); // serve the static frontend
 
-// sessionId -> the live session. This Map is the entire "database".
-type Session = { state: SessionState; carrier: Carrier };
-const sessions = new Map<string, Session>();
+// list the carriers the frontend can offer (single source: the registry)
+app.get("/carriers", (_req, res) => res.json({ carriers: Object.keys(carriers) }));
 
-// Carrier name -> factory. Add real carriers here behind the same interface.
-const carriers: Record<string, () => Carrier> = {
-    mock: () => new MockCarrier(),
-};
+// Speculative pre-warm: open the browser and load the login form ahead of time
+// (while the user types), so /login can skip ~11s of session + page load.
+app.post("/prepare", async (req, res) => {
+    const fields = requireStrings(req.body, ["carrier"]);
+    if (!fields) return res.status(400).json({ error: "carrier is required" });
+    const make = carriers[fields.carrier];
+    if (!make) return res.status(400).json({ error: "unknown carrier" });
+
+    const warmId = randomUUID();
+    const session: Session = { state: "WARMING", carrier: make(), key: "", lastActivity: Date.now() };
+    sessions.set(warmId, session);
+    try {
+        await session.carrier.prepare();
+        session.state = "WARM";
+        session.lastActivity = Date.now();
+        return res.json({ warmId });
+    } catch (e) {
+        await cleanup(warmId);
+        return sendError(res, e);
+    }
+});
 
 app.post("/login", async (req, res) => {
-    const { carrier: carrierName, username, password } = req.body;
+    const fields = requireStrings(req.body, ["carrier", "username", "password"]);
+    if (!fields) return res.status(400).json({ error: "carrier, username and password are required" });
+    const { carrier: carrierName, username, password } = fields;
     const make = carriers[carrierName];
     if (!make) return res.status(400).json({ error: "unknown carrier" });
 
-    const sessionId = randomUUID();
-    const session: Session = { state: "LOGGING_IN", carrier: make() };
-    sessions.set(sessionId, session);
+    const key = `${carrierName}:${username}`;
+    // reuse a ready pre-warmed session if the client supplied one; else go fresh
+    const warmId = typeof req.body.warmId === "string" ? req.body.warmId : undefined;
+    const warm = warmId ? sessions.get(warmId) : undefined;
+    let sessionId: string;
+    let session: Session;
+    if (warm && warm.state === "WARM") {
+        sessionId = warmId!;
+        session = warm;
+        session.key = key;
+        session.state = "LOGGING_IN";
+        session.lastActivity = Date.now();
+    } else {
+        sessionId = randomUUID();
+        session = { state: "LOGGING_IN", carrier: make(contexts.get(key)), key, lastActivity: Date.now() };
+        sessions.set(sessionId, session);
+    }
 
     try {
         const { mfaRequired } = await session.carrier.login(username, password);
         if (mfaRequired) {
             session.state = "AWAITING_MFA";
-            return res.json({ status: "mfa_needed", sessionId });
+            return res.json({ status: "mfa_needed", sessionId } satisfies LoginResponse);
         }
         // trusted device, no MFA: go straight to documents
         const documents = await fetchAndFinish(sessionId, session);
-        return res.json({ status: "done", sessionId, documents });
+        return res.json({ status: "done", sessionId, documents } satisfies LoginResponse);
     } catch (e) {
         await cleanup(sessionId);
         return sendError(res, e);
@@ -50,53 +84,28 @@ app.post("/login", async (req, res) => {
 });
 
 app.post("/mfa", async (req, res) => {
-    const { sessionId, code } = req.body;
+    const fields = requireStrings(req.body, ["sessionId", "code"]);
+    if (!fields) return res.status(400).json({ error: "sessionId and code are required" });
+    const { sessionId, code } = fields;
     const session = sessions.get(sessionId);
     if (!session) return res.status(404).json({ error: "no such session" });
+    session.lastActivity = Date.now(); // mark activity so the reaper won't sweep it
     if (session.state !== "AWAITING_MFA")
         return res.status(409).json({ error: `session is ${session.state}, not awaiting MFA` });
 
     try {
-        session.state = "SUBMITTING_MFA";
-        await session.carrier.submitMfa(code);
-        const documents = await fetchAndFinish(sessionId, session);
-        return res.json({ status: "done", documents });
+        const documents = await withLock(session, async () => {
+            session.state = "SUBMITTING_MFA";
+            await session.carrier.submitMfa(code);
+            return fetchAndFinish(sessionId, session);
+        });
+        return res.json({ status: "done", documents } satisfies MfaResponse);
     } catch (e) {
+        if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         await cleanup(sessionId);
         return sendError(res, e);
     }
 });
 
-// Fetch docs, close the browser, drop the session. Shared by both endpoints.
-async function fetchAndFinish(sessionId: string, session: Session) {
-    session.state = "FETCHING_DOCS";
-    const documents = await session.carrier.fetchDocuments();
-    session.state = "DONE";
-    await session.carrier.close();
-    sessions.delete(sessionId);
-    return documents;
-}
-
-// Close the browser and drop the session after a failure. Never throws.
-async function cleanup(sessionId: string) {
-    const session = sessions.get(sessionId);
-    if (!session) return;
-    try {
-        await session.carrier.close();
-    } catch { }
-    sessions.delete(sessionId);
-}
-
-// Map a thrown error to a status code. Unknown errors are a 500.
-function sendError(res: Response, e: unknown) {
-    if (e instanceof InvalidCredentialsError || e instanceof InvalidMfaError)
-        return res.status(401).json({ error: e.message });
-    if (e instanceof AntiBotError) return res.status(503).json({ error: e.message });
-    if (e instanceof CarrierTimeoutError) return res.status(504).json({ error: e.message });
-    if (e instanceof DocumentsUnavailableError) return res.status(502).json({ error: e.message });
-    if (e instanceof CarrierError) return res.status(500).json({ error: e.message });
-    console.error(e);
-    return res.status(500).json({ error: "internal error" });
-}
-
+startReaper();
 app.listen(3000, () => console.log("up on :3000"));

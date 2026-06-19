@@ -43,8 +43,9 @@ Residual risks (both handled by carrier choice):
 
 ## Stack (decided)
 
-- **All TypeScript, one repo.** Next.js, frontend + API routes, one deploy.
-- No Python (maybe throwaway scripts only). No Go (no concurrency need).
+- **All TypeScript, one repo.** Express (long-running) serving one static HTML page.
+  Not Next.js/serverless: the backend must hold a live browser across the MFA pause.
+- No Python (throwaway spikes only). No Go (no concurrency need).
 - Reason: stealth ecosystem and cloud-browser SDKs are JS-first; one language = less to wire.
 
 ## MFA flow (the shape)
@@ -70,12 +71,12 @@ Write carrier one fully, then carrier two, THEN extract what's shared. Don't abs
 
 ## Open / TODO
 
-- [ ] Pick the two carriers (test which don't hard-gate on captcha)
-- [ ] Source real credentials (friend/family with a policy)
-- [ ] Sign up for Browserbase, get API key
-- [ ] Scaffold Next.js app
-- [ ] Carrier 1 script end to end
-- [ ] Carrier 2 script
-- [ ] Frontend: dropdown, creds, MFA prompt, doc viewer
-- [ ] Deploy (Vercel)
+- [x] Browserbase: login + MFA + dashboard proven end to end (Allstate, residential proxy)
+- [x] Backend: /login, /mfa, /carriers, session Map, typed errors (vs mock)
+- [ ] AllstateCarrier: real login / MFA / fetchDocuments behind the Carrier interface
+- [ ] Second carrier
+- [ ] Frontend: build to frontend.md (dropdown done; login / MFA / docs next)
+- [ ] Session reuse via Browserbase Contexts
+- [ ] Latency instrumentation (~8s budget)
+- [ ] Deploy the long-running backend off the machine (Railway/Render/Fly, not serverless)
 - [ ] README + Loom + Claude session links

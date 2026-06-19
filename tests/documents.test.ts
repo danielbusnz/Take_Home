@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { inspectDocument, validateDocuments } from "./documents.js";
-import type { Document } from "./types.js";
+import { inspectDocument, validateDocuments } from "../src/documents.js";
+import type { Document } from "../src/types.js";
 
 const pdf: Document = { name: "dec.pdf", contentType: "application/pdf", bytes: "abc" };
 

@@ -1,0 +1,15 @@
+%% User flow: pull policy documents. Diagrams-as-code: edit this, then re-render.
+flowchart TD
+  A[Enter carrier + email + password] --> B[Log in via Browserbase]
+  B -->|bad creds / captcha / timeout| X[Show error]
+  B --> C{MFA required?}
+  C -->|no, trusted session| E[Fetch documents]
+  C -->|yes| D[Code sent to SMS, user enters it]
+  D --> E
+  E --> F[Render documents + download]
+
+%% Core assumptions:
+%%  1. Login is by email, not User ID
+%%  2. If MFA, the code goes to SMS (auto-picked)
+%%  3. Documents live at a fixed URL and come back as PDFs
+%%  4. One policy per account

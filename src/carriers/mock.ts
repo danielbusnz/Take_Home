@@ -12,31 +12,40 @@ const VALID_CODE = "123456";
 const SAMPLE_PDF = "JVBERi0xLjAKJcK1"; // tiny base64 stub, stands in for a real PDF
 
 export class MockCarrier implements Carrier {
-  readonly name = "mock";
-  private loggedIn = false;
+    readonly name = "mock";
+    readonly contextId: string | undefined;
+    private loggedIn = false;
 
-  async login(username: string, _password: string): Promise<{ mfaRequired: boolean }> {
-    if (username === "baduser") throw new InvalidCredentialsError("bad username or password");
-    if (username === "nomfa") {
-      this.loggedIn = true;
-      return { mfaRequired: false };
+    constructor(contextId?: string) {
+        this.contextId = contextId; // mock ignores it; just satisfies the interface
     }
-    return { mfaRequired: true };
-  }
 
-  async submitMfa(code: string): Promise<void> {
-    if (code !== VALID_CODE) throw new InvalidMfaError("wrong or expired code");
-    this.loggedIn = true;
-  }
+    async prepare(): Promise<void> {
+        // no real browser to warm
+    }
 
-  async fetchDocuments(): Promise<Document[]> {
-    const docs: Document[] = [
-      { name: "declarations.pdf", contentType: "application/pdf", bytes: SAMPLE_PDF },
-    ];
-    return validateDocuments(this.name, docs);
-  }
+    async login(username: string, _password: string): Promise<{ mfaRequired: boolean }> {
+        if (username === "baduser") throw new InvalidCredentialsError("bad username or password");
+        if (username === "nomfa") {
+            this.loggedIn = true;
+            return { mfaRequired: false };
+        }
+        return { mfaRequired: true };
+    }
 
-  async close(): Promise<void> {
-    this.loggedIn = false;
-  }
+    async submitMfa(code: string): Promise<void> {
+        if (code !== VALID_CODE) throw new InvalidMfaError("wrong or expired code");
+        this.loggedIn = true;
+    }
+
+    async fetchDocuments(): Promise<Document[]> {
+        const docs: Document[] = [
+            { name: "declarations.pdf", contentType: "application/pdf", bytes: SAMPLE_PDF },
+        ];
+        return validateDocuments(this.name, docs);
+    }
+
+    async close(): Promise<void> {
+        this.loggedIn = false;
+    }
 }
