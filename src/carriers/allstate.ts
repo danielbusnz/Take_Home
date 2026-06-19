@@ -123,27 +123,9 @@ export class AllstateCarrier implements Carrier {
         const files = await Promise.all(filePromises);
         console.log(`[timing] trigger-downloads: ${Date.now() - tClicks}ms`);
 
-        // pull the synced files out of Browserbase and pair them to the titles
-        const tList = Date.now();
-        const downloads = await this.session!.waitForDownloads(names.length);
-        console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
-        const byName = new Map(downloads.map((d) => [d.filename, d]));
-        const tBytes = Date.now();
-        // fetch every doc's bytes concurrently so the round-trips overlap
-        const docs = (
-            await Promise.all(
-                names.map(async (name, i) => {
-                    const meta = byName.get(files[i]);
-                    if (!meta) return null;
-                    return {
-                        name,
-                        contentType: meta.mimeType || "application/pdf",
-                        bytes: await this.session!.fetchBytes(meta.id),
-                    } satisfies Document;
-                }),
-            )
-        ).filter((d): d is Document => d !== null);
-        console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
+        // pair each captured filename to its title, then collect the bytes
+        const items = names.map((name, i) => ({ name, filename: files[i] }));
+        const docs = await this.session!.collectDocuments(items);
         return validateDocuments(this.name, docs);
     }
 

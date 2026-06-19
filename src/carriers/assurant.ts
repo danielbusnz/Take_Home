@@ -118,28 +118,11 @@ export class AssurantCarrier implements Carrier {
         const files = await Promise.all(filePromises);
         console.log(`[timing] trigger-downloads: ${Date.now() - tClicks}ms`);
 
-        // pull the synced files out of Browserbase and pair them by filename
-        const tList = Date.now();
-        const triggered = files.filter(Boolean).length;
-        const downloads = await this.session!.waitForDownloads(triggered);
-        console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
-        const byName = new Map(downloads.map((d) => [d.filename, d]));
-        const tBytes = Date.now();
-        // fetch every doc's bytes concurrently so the round-trips overlap
-        const docs = (
-            await Promise.all(
-                files.map(async (filename) => {
-                    const meta = byName.get(filename);
-                    if (!meta) return null;
-                    return {
-                        name: meta.filename.replace(/\.pdf$/i, ""),
-                        contentType: meta.mimeType || "application/pdf",
-                        bytes: await this.session!.fetchBytes(meta.id),
-                    } satisfies Document;
-                }),
-            )
-        ).filter((d): d is Document => d !== null);
-        console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
+        // name each doc by its (opaque) filename, then collect the bytes
+        const items = files
+            .filter(Boolean)
+            .map((filename) => ({ name: filename.replace(/\.pdf$/i, ""), filename }));
+        const docs = await this.session!.collectDocuments(items);
         return validateDocuments(this.name, docs);
     }
 

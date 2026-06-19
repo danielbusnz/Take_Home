@@ -1,5 +1,6 @@
 import { chromium, type Browser, type Page } from "playwright";
 import Browserbase from "@browserbasehq/sdk";
+import type { Document } from "./types.js";
 import { CarrierError, DocumentsUnavailableError } from "./errors.js";
 
 // A Browserbase cloud browser on a residential proxy, plus its downloads API.
@@ -64,6 +65,32 @@ export class BrowserbaseSession {
             headers: { "x-bb-api-key": API_KEY, Accept: "application/octet-stream" },
         });
         return Buffer.from(await r.arrayBuffer()).toString("base64");
+    }
+
+    // Given items a carrier already triggered (each a display name + the filename
+    // the download produced), wait for the files to sync, pair them by filename,
+    // and fetch every doc's bytes concurrently. Carriers differ in how they
+    // trigger downloads; this collection tail is the same for all of them.
+    async collectDocuments(items: { name: string; filename: string }[]): Promise<Document[]> {
+        const want = items.filter((i) => i.filename).length;
+        const tList = Date.now();
+        const downloads = await this.waitForDownloads(want);
+        console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
+        const byFilename = new Map(downloads.map((d) => [d.filename, d]));
+        const tBytes = Date.now();
+        const docs = await Promise.all(
+            items.map(async (item) => {
+                const meta = byFilename.get(item.filename);
+                if (!meta) return null;
+                return {
+                    name: item.name,
+                    contentType: meta.mimeType || "application/pdf",
+                    bytes: await this.fetchBytes(meta.id),
+                } satisfies Document;
+            }),
+        );
+        console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
+        return docs.filter((d): d is Document => d !== null);
     }
 
     async close(): Promise<void> {
