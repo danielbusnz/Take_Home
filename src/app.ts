@@ -82,7 +82,9 @@ app.post("/login", async (req, res) => {
                 return { status: "mfa_needed", sessionId } satisfies LoginResponse;
             }
             // trusted device, no MFA: go straight to documents
+            const tGraded = Date.now();
             const documents = await fetchAndFinish(sessionId, session);
+            console.log(`[timing] GRADED login->docs (no mfa): ${Date.now() - tGraded}ms`);
             return { status: "done", sessionId, documents } satisfies LoginResponse;
         });
         return res.json(result);
@@ -104,11 +106,13 @@ app.post("/mfa", async (req, res) => {
         return res.status(409).json({ error: `session is ${session.state}, not awaiting MFA` });
 
     try {
+        const tGraded = Date.now();
         const documents = await withLock(session, async () => {
             session.state = "SUBMITTING_MFA";
             await session.carrier.submitMfa(code);
             return fetchAndFinish(sessionId, session);
         });
+        console.log(`[timing] GRADED mfa-submit->docs: ${Date.now() - tGraded}ms`);
         return res.json({ status: "done", documents } satisfies MfaResponse);
     } catch (e) {
         if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });

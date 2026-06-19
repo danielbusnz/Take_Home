@@ -128,16 +128,20 @@ export class AllstateCarrier implements Carrier {
         console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
         const byName = new Map(downloads.map((d) => [d.filename, d]));
         const tBytes = Date.now();
-        const docs: Document[] = [];
-        for (let i = 0; i < names.length; i++) {
-            const meta = byName.get(files[i]);
-            if (!meta) continue;
-            docs.push({
-                name: names[i],
-                contentType: meta.mimeType || "application/pdf",
-                bytes: await this.session!.fetchBytes(meta.id),
-            });
-        }
+        // fetch every doc's bytes concurrently so the round-trips overlap
+        const docs = (
+            await Promise.all(
+                names.map(async (name, i) => {
+                    const meta = byName.get(files[i]);
+                    if (!meta) return null;
+                    return {
+                        name,
+                        contentType: meta.mimeType || "application/pdf",
+                        bytes: await this.session!.fetchBytes(meta.id),
+                    } satisfies Document;
+                }),
+            )
+        ).filter((d): d is Document => d !== null);
         console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
         return validateDocuments(this.name, docs);
     }

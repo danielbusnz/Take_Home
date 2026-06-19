@@ -130,16 +130,20 @@ export class AssurantCarrier implements Carrier {
         console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
         const byName = new Map(downloads.map((d) => [d.filename, d]));
         const tBytes = Date.now();
-        const docs: Document[] = [];
-        for (const filename of files) {
-            const meta = byName.get(filename);
-            if (!meta) continue;
-            docs.push({
-                name: meta.filename.replace(/\.pdf$/i, ""),
-                contentType: meta.mimeType || "application/pdf",
-                bytes: await this.session!.fetchBytes(meta.id),
-            });
-        }
+        // fetch every doc's bytes concurrently so the round-trips overlap
+        const docs = (
+            await Promise.all(
+                files.map(async (filename) => {
+                    const meta = byName.get(filename);
+                    if (!meta) return null;
+                    return {
+                        name: meta.filename.replace(/\.pdf$/i, ""),
+                        contentType: meta.mimeType || "application/pdf",
+                        bytes: await this.session!.fetchBytes(meta.id),
+                    } satisfies Document;
+                }),
+            )
+        ).filter((d): d is Document => d !== null);
         console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
         return validateDocuments(this.name, docs);
     }
