@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type ErrorRequestHandler } from "express";
 import { randomUUID } from "node:crypto";
 import type { LoginResponse, MfaResponse } from "./types.js";
 import { carriers } from "./carriers/registry.js";
@@ -117,3 +117,20 @@ app.post("/mfa", async (req, res) => {
         return sendError(res, e);
     }
 });
+
+// any request that matched no route above: answer with our JSON shape, not the
+// default Express HTML 404. (Errors thrown upstream are handled separately.)
+app.use((_req, res) => {
+    res.status(404).json({ error: "not found" });
+});
+
+// Errors thrown before/outside a route handler (malformed JSON, oversized body)
+// skip the routes and land here. Must be the last middleware and take 4 args.
+// Keep the response JSON and never leak the stack trace to the client.
+const onError: ErrorRequestHandler = (err, _req, res, _next) => {
+    console.error("unhandled request error:", err);
+    if (err?.type === "entity.too.large") return res.status(413).json({ error: "request too large" });
+    if (err?.type === "entity.parse.failed") return res.status(400).json({ error: "invalid JSON body" });
+    res.status(500).json({ error: "internal error" });
+};
+app.use(onError);

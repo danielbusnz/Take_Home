@@ -123,3 +123,47 @@ test("pre-warm then login reuses the warm session", async () => {
     assert.equal(login.body.status, "done");
     assert.equal(login.body.sessionId, warm.body.warmId); // same session, reused
 });
+
+// --- errors that happen outside a route handler must still return JSON, no stack ---
+
+const leak = /node_modules|\/home\/|SyntaxError|\bat /; // signs of a leaked stack trace
+
+test("unknown route returns a JSON 404, not HTML", async () => {
+    const res = await fetch(base + "/does-not-exist");
+    const text = await res.text();
+    assert.equal(res.status, 404);
+    assert.match(res.headers.get("content-type") || "", /application\/json/);
+    assert.equal(JSON.parse(text).error, "not found");
+    assert.doesNotMatch(text, leak);
+});
+
+test("wrong method on a known route returns a JSON 404", async () => {
+    const res = await fetch(base + "/carriers", { method: "POST" });
+    assert.equal(res.status, 404);
+    assert.match(res.headers.get("content-type") || "", /application\/json/);
+});
+
+test("malformed JSON body returns a JSON 400 with no stack leak", async () => {
+    const res = await fetch(base + "/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{ this is not json",
+    });
+    const text = await res.text();
+    assert.equal(res.status, 400);
+    assert.match(res.headers.get("content-type") || "", /application\/json/);
+    assert.ok(JSON.parse(text).error);
+    assert.doesNotMatch(text, leak);
+});
+
+test("oversized body returns a JSON 413 with no stack leak", async () => {
+    const res = await fetch(base + "/login", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ carrier: "mock", x: "A".repeat(200_000) }),
+    });
+    const text = await res.text();
+    assert.equal(res.status, 413);
+    assert.match(res.headers.get("content-type") || "", /application\/json/);
+    assert.doesNotMatch(text, leak);
+});
