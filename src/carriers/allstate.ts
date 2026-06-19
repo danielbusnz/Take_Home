@@ -1,5 +1,5 @@
 import type { Carrier, Document } from "../types.js";
-import { InvalidMfaError } from "../errors.js";
+import { CarrierError, InvalidMfaError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
 import { BrowserbaseSession, step } from "../browserbase.js";
 
@@ -57,10 +57,17 @@ export class AllstateCarrier implements Carrier {
 
         // read the page: MFA prompt, or straight to the dashboard?
         const tNav = Date.now();
-        const outcome = await Promise.race([
-            page.waitForURL(/verification/, { timeout: STEP_TIMEOUT }).then(() => "mfa" as const),
-            page.waitForURL(/\/secured\//, { timeout: STEP_TIMEOUT }).then(() => "dashboard" as const),
-        ]);
+        let outcome: "mfa" | "dashboard";
+        try {
+            outcome = await Promise.race([
+                page.waitForURL(/verification/, { timeout: STEP_TIMEOUT }).then(() => "mfa" as const),
+                page.waitForURL(/\/secured\//, { timeout: STEP_TIMEOUT }).then(() => "dashboard" as const),
+            ]);
+        } catch {
+            // neither expected page showed: capture what Allstate actually served
+            await page.screenshot({ path: "/tmp/allstate-unexpected.png" }).catch(() => {});
+            throw new CarrierError(`unexpected page after login: ${page.url()}`);
+        }
         console.log(`[timing]   auth-nav: ${Date.now() - tNav}ms`);
         console.log(`[timing] submit+detect: ${Date.now() - tSubmit}ms`);
         if (outcome === "dashboard") return { mfaRequired: false }; // trusted device, no MFA
