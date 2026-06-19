@@ -117,4 +117,5 @@ app.post("/mfa", async (req, res) => {
 });
 
 startReaper();
-app.listen(3000, () => console.log("up on :3000"));
+const PORT = Number(process.env.PORT) || 3000; // platforms (Fly) inject PORT
+app.listen(PORT, () => console.log(`up on :${PORT}`));

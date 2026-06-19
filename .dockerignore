@@ -1,0 +1,8 @@
+# never ship secrets or local junk into the image
+.env
+node_modules
+.git
+scripts
+tests
+*.md
+/tmp

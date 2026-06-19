@@ -1,0 +1,22 @@
+# Single always-on machine in us-east-1 (iad), co-located with the Browserbase
+# session so the CDP round-trip stays in single-digit ms. Do not scale past 1:
+# session state lives in an in-memory Map, so a second instance can't serve a
+# user's /mfa for a browser the first instance holds.
+app = "take-home-policy-puller"
+primary_region = "iad"
+
+[build]
+
+[env]
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = false   # keep it warm: no cold start for a reviewer
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"             # room for the browser CDP link + base64 PDFs
