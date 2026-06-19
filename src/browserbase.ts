@@ -102,6 +102,14 @@ export class BrowserbaseSession {
     }
 }
 
+// Carriers hold an optional session (set by prepare/login). This narrows it to a
+// non-optional and throws a clear typed error if a method runs before the browser
+// was opened, instead of a raw TypeError from a `!` assertion.
+export function requireSession(session: BrowserbaseSession | undefined): BrowserbaseSession {
+    if (!session) throw new CarrierError("browser session not open; call prepare() or login() first");
+    return session;
+}
+
 // Wrap a fragile browser step: let our own typed errors through, but turn an
 // unexpected failure (e.g. a changed selector) into a clean CarrierError plus a
 // saved screenshot for debugging, instead of a raw crash.

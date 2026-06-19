@@ -1,7 +1,7 @@
 import type { Carrier, Document } from "../types.js";
 import { InvalidCredentialsError, InvalidMfaError, DocumentsUnavailableError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
-import { BrowserbaseSession, step } from "../browserbase.js";
+import { BrowserbaseSession, step, requireSession } from "../browserbase.js";
 
 const LOGIN_URL = process.env.ASSURANT_LOGIN_URL ?? "https://manage.myassurantpolicy.com/app/login";
 const STEP_TIMEOUT = 30_000;
@@ -33,7 +33,7 @@ export class AssurantCarrier implements Carrier {
 
     async login(username: string, password: string): Promise<{ mfaRequired: boolean }> {
         if (!this.session) await this.prepare(); // not pre-warmed: open + load the form now
-        const page = this.session!.page;
+        const page = requireSession(this.session).page;
 
         const tSubmit = Date.now();
         await page.locator("#okta-signin-username").fill(username);
@@ -68,7 +68,7 @@ export class AssurantCarrier implements Carrier {
     }
 
     async submitMfa(code: string): Promise<void> {
-        const page = this.session!.page;
+        const page = requireSession(this.session).page;
         await page.locator('input[name="answer"]').fill(code);
         // the Okta submit is an <input type=submit> whose accessible name is its
         // aria-label ("Submit button"), so match on /submit/, not the "Verify" value.
@@ -81,7 +81,8 @@ export class AssurantCarrier implements Carrier {
     }
 
     async fetchDocuments(): Promise<Document[]> {
-        const page = this.session!.page;
+        const session = requireSession(this.session);
+        const page = session.page;
         const tNav = Date.now();
         // we land on the policy-selection list; open the policy to set it active
         // server-side (the snapshot is what /Policy/Documents resolves against).
@@ -122,7 +123,7 @@ export class AssurantCarrier implements Carrier {
         const items = files
             .filter(Boolean)
             .map((filename) => ({ name: filename.replace(/\.pdf$/i, ""), filename }));
-        const docs = await this.session!.collectDocuments(items);
+        const docs = await session.collectDocuments(items);
         return validateDocuments(this.name, docs);
     }
 

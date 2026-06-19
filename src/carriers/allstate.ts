@@ -1,7 +1,7 @@
 import type { Carrier, Document } from "../types.js";
 import { CarrierError, InvalidMfaError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
-import { BrowserbaseSession, step } from "../browserbase.js";
+import { BrowserbaseSession, step, requireSession } from "../browserbase.js";
 
 const LOGIN_URL =
     process.env.ALLSTATE_LOGIN_URL ?? "https://myaccountrwd.allstate.com/anon/account/login";
@@ -39,7 +39,7 @@ export class AllstateCarrier implements Carrier {
 
     async login(username: string, password: string): Promise<{ mfaRequired: boolean }> {
         if (!this.session) await this.prepare(); // not pre-warmed: open + load the form now
-        const page = this.session!.page;
+        const page = requireSession(this.session).page;
 
         const tSubmit = Date.now();
         // Email tab already opened in prepare(); just type the creds and submit.
@@ -75,7 +75,7 @@ export class AllstateCarrier implements Carrier {
     }
 
     async submitMfa(code: string): Promise<void> {
-        const page = this.session!.page;
+        const page = requireSession(this.session).page;
         await page.locator("#pinCode").fill(code);
         await page.getByRole("button", { name: /continue|verify|submit/i }).first().click();
         try {
@@ -86,7 +86,8 @@ export class AllstateCarrier implements Carrier {
     }
 
     async fetchDocuments(): Promise<Document[]> {
-        const page = this.session!.page;
+        const session = requireSession(this.session);
+        const page = session.page;
         // navigate the way the UI does: Policies dropdown -> Documents.
         // (a direct goto to the docs URL redirects back to the dashboard.)
         const tNav = Date.now();
@@ -125,7 +126,7 @@ export class AllstateCarrier implements Carrier {
 
         // pair each captured filename to its title, then collect the bytes
         const items = names.map((name, i) => ({ name, filename: files[i] }));
-        const docs = await this.session!.collectDocuments(items);
+        const docs = await session.collectDocuments(items);
         return validateDocuments(this.name, docs);
     }
 
