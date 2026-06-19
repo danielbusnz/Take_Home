@@ -33,11 +33,13 @@ app.post("/prepare", async (req, res) => {
     const session: Session = { state: "WARMING", carrier: make(), key: "", lastActivity: Date.now() };
     sessions.set(warmId, session);
     try {
-        await session.carrier.prepare();
+        // hold the lock so the reaper can't sweep the session mid-prepare
+        await withLock(session, () => session.carrier.prepare());
         session.state = "WARM";
         session.lastActivity = Date.now();
         return res.json({ warmId });
     } catch (e) {
+        if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         await cleanup(warmId);
         return sendError(res, e);
     }
@@ -56,7 +58,8 @@ app.post("/login", async (req, res) => {
     const warm = warmId ? sessions.get(warmId) : undefined;
     let sessionId: string;
     let session: Session;
-    if (warm && warm.state === "WARM") {
+    // only reuse a warm session that was warmed for THIS carrier
+    if (warm && warm.state === "WARM" && warm.carrier.name === carrierName) {
         sessionId = warmId!;
         session = warm;
         session.key = key;
@@ -69,15 +72,21 @@ app.post("/login", async (req, res) => {
     }
 
     try {
-        const { mfaRequired } = await session.carrier.login(username, password);
-        if (mfaRequired) {
-            session.state = "AWAITING_MFA";
-            return res.json({ status: "mfa_needed", sessionId } satisfies LoginResponse);
-        }
-        // trusted device, no MFA: go straight to documents
-        const documents = await fetchAndFinish(sessionId, session);
-        return res.json({ status: "done", sessionId, documents } satisfies LoginResponse);
+        // hold the lock for the whole login so a double-submit is rejected (409)
+        // and the reaper can't close the browser mid-login
+        const result = await withLock(session, async () => {
+            const { mfaRequired } = await session.carrier.login(username, password);
+            if (mfaRequired) {
+                session.state = "AWAITING_MFA";
+                return { status: "mfa_needed", sessionId } satisfies LoginResponse;
+            }
+            // trusted device, no MFA: go straight to documents
+            const documents = await fetchAndFinish(sessionId, session);
+            return { status: "done", sessionId, documents } satisfies LoginResponse;
+        });
+        return res.json(result);
     } catch (e) {
+        if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         await cleanup(sessionId);
         return sendError(res, e);
     }
