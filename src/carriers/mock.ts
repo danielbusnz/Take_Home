@@ -13,12 +13,7 @@ const SAMPLE_PDF = "JVBERi0xLjAKJcK1"; // tiny base64 stub, stands in for a real
 
 export class MockCarrier implements Carrier {
     readonly name = "mock";
-    readonly contextId: string | undefined;
     private loggedIn = false;
-
-    constructor(contextId?: string) {
-        this.contextId = contextId; // mock ignores it; just satisfies the interface
-    }
 
     async prepare(): Promise<void> {
         // no real browser to warm

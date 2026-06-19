@@ -6,21 +6,16 @@ import type { Carrier, SessionState } from "./types.js";
 export type Session = {
     state: SessionState;
     carrier: Carrier;
-    key: string;
     inFlight?: Promise<unknown>;
     lastActivity: number;
 };
 
 export const sessions = new Map<string, Session>();
 
-// remembered Browserbase context per "carrier:username", so a repeat run can
-// reuse cookies and skip MFA. Opaque ids only, never credentials.
-export const contexts = new Map<string, string>();
-
 // One operation at a time per session. A session owns a single live browser, so
 // a second request for the same session is rejected (BusyError) rather than
 // driving the browser in parallel. The lock frees on settle, success or failure.
-export class BusyError extends Error {}
+export class BusyError extends Error { }
 
 export function withLock<T>(session: Session, fn: () => Promise<T>): Promise<T> {
     if (session.inFlight) return Promise.reject(new BusyError());
@@ -36,8 +31,6 @@ export async function fetchAndFinish(sessionId: string, session: Session) {
     session.state = "FETCHING_DOCS";
     const documents = await session.carrier.fetchDocuments();
     session.state = "DONE";
-    // remember the context so the next run for this user can skip MFA
-    if (session.carrier.contextId) contexts.set(session.key, session.carrier.contextId);
     await session.carrier.close();
     sessions.delete(sessionId);
     return documents;

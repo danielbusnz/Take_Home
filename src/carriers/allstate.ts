@@ -13,13 +13,7 @@ const STEP_TIMEOUT = 30_000;
 // Shared Browserbase plumbing (session + downloads) lives in BrowserbaseSession.
 export class AllstateCarrier implements Carrier {
     readonly name = "allstate";
-    // mutable: set to the context we created during login, or the one passed in
-    contextId: string | undefined;
     private session?: BrowserbaseSession;
-
-    constructor(contextId?: string) {
-        this.contextId = contextId;
-    }
 
     // Open the browser and load the login form. No credentials needed, so this
     // can run ahead of login() to pre-warm while the user is still typing.
@@ -65,7 +59,7 @@ export class AllstateCarrier implements Carrier {
             ]);
         } catch {
             // neither expected page showed: capture what Allstate actually served
-            await page.screenshot({ path: "/tmp/allstate-unexpected.png" }).catch(() => {});
+            await page.screenshot({ path: "/tmp/allstate-unexpected.png" }).catch(() => { });
             throw new CarrierError(`unexpected page after login: ${page.url()}`);
         }
         console.log(`[timing]   auth-nav: ${Date.now() - tNav}ms`);

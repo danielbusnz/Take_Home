@@ -13,12 +13,7 @@ const STEP_TIMEOUT = 30_000;
 // Shared Browserbase plumbing (session + downloads) lives in BrowserbaseSession.
 export class AssurantCarrier implements Carrier {
     readonly name = "assurant";
-    contextId: string | undefined;
     private session?: BrowserbaseSession;
-
-    constructor(contextId?: string) {
-        this.contextId = contextId;
-    }
 
     // Open the browser and load the Okta login form. No credentials needed, so
     // this can run ahead of login() to pre-warm while the user is still typing.

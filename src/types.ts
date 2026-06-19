@@ -36,9 +36,6 @@ export type SessionState =
 
 export interface Carrier {
     readonly name: string;
-    // the Browserbase context this carrier used (created on first login, or one
-    // handed in for reuse). The server saves it to skip MFA on a repeat run.
-    readonly contextId: string | undefined;
     // open the browser and load the login form, no credentials yet. Optional to
     // call ahead of login() to pre-warm while the user is still typing.
     prepare(): Promise<void>;

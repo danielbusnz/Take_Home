@@ -5,7 +5,6 @@ import { carriers } from "./carriers/registry.js";
 import {
     type Session,
     sessions,
-    contexts,
     BusyError,
     withLock,
     fetchAndFinish,
@@ -31,7 +30,7 @@ app.post("/prepare", async (req, res) => {
     if (!make) return res.status(400).json({ error: "unknown carrier" });
 
     const warmId = randomUUID();
-    const session: Session = { state: "WARMING", carrier: make(), key: "", lastActivity: Date.now() };
+    const session: Session = { state: "WARMING", carrier: make(), lastActivity: Date.now() };
     sessions.set(warmId, session);
     try {
         // hold the lock so the reaper can't sweep the session mid-prepare
@@ -53,7 +52,6 @@ app.post("/login", async (req, res) => {
     const make = carriers[carrierName];
     if (!make) return res.status(400).json({ error: "unknown carrier" });
 
-    const key = `${carrierName}:${username}`;
     // reuse a ready pre-warmed session if the client supplied one; else go fresh
     const warmId = typeof req.body.warmId === "string" ? req.body.warmId : undefined;
     const warm = warmId ? sessions.get(warmId) : undefined;
@@ -63,12 +61,11 @@ app.post("/login", async (req, res) => {
     if (warm && warm.state === "WARM" && warm.carrier.name === carrierName) {
         sessionId = warmId!;
         session = warm;
-        session.key = key;
         session.state = "LOGGING_IN";
         session.lastActivity = Date.now();
     } else {
         sessionId = randomUUID();
-        session = { state: "LOGGING_IN", carrier: make(contexts.get(key)), key, lastActivity: Date.now() };
+        session = { state: "LOGGING_IN", carrier: make(), lastActivity: Date.now() };
         sessions.set(sessionId, session);
     }
 
