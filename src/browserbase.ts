@@ -9,7 +9,13 @@ import { CarrierError, DocumentsUnavailableError } from "./errors.js";
 export type BbDownload = { id: string; filename: string; mimeType: string; size: number };
 
 const API_KEY = process.env.BROWSERBASE_API_KEY!;
-const bb = new Browserbase({ apiKey: API_KEY });
+
+// Construct the client lazily: importing this module (e.g. in tests, via the
+// carrier registry) must not require credentials. Only opening a real session does.
+let client: Browserbase | undefined;
+function bb(): Browserbase {
+    return (client ??= new Browserbase({ apiKey: API_KEY }));
+}
 
 export class BrowserbaseSession {
     private constructor(
@@ -21,7 +27,7 @@ export class BrowserbaseSession {
     // Open a session, connect over CDP, and enable downloads to BB cloud storage.
     static async open(): Promise<BrowserbaseSession> {
         const tCreate = Date.now();
-        const session = await bb.sessions.create({
+        const session = await bb().sessions.create({
             projectId: process.env.BROWSERBASE_PROJECT_ID!,
             proxies: true, // residential egress, beats datacenter-IP anti-bot
             region: "us-east-1", // co-locate near our compute; CDP RTT dominates per-action cost
