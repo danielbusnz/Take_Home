@@ -10,23 +10,42 @@ Web app that pulls a user's insurance policy documents from carrier portals via 
 
 - Dev (watch): `npm run dev`
 - Start: `npm start`
-- Tests: `npm test`
+- Tests: `npm test` (Node test runner over `tests/**`)
+- Typecheck: `npx tsc --noEmit`
 
-Server runs on http://localhost:3000 and serves the frontend at `/`.
+Server runs on http://localhost:3000 and serves the frontend at `/`. `start`/`dev` load
+`.env` via `--env-file-if-exists`. Needs `BROWSERBASE_API_KEY`, `BROWSERBASE_PROJECT_ID`,
+and for live Allstate `ALLSTATE_USER` / `ALLSTATE_PASSWORD` / `ALLSTATE_LOGIN_URL`.
+Endpoints: `GET /carriers`, `POST /prepare`, `POST /login`, `POST /mfa`.
 
-## Progress (2026-06-18)
+## Progress (2026-06-19)
 
 Done:
-- Backend flow: `/login` and `/mfa`, in-memory session `Map`, state machine, typed carrier errors mapped to HTTP codes, cleanup on failure.
-- `MockCarrier` simulating bad creds, MFA, no-MFA, and document fetch.
-- Document validation + logging (`documents.ts`) with tests.
-- Frontend MVP (`public/index.html`): dropdown, creds form, MFA prompt, doc viewer. Works end to end against the mock.
+- Backend: `/login`, `/mfa`, `/carriers`, `/prepare`. In-memory session Map, state machine,
+  typed errors -> HTTP codes, 400 input guards, busy-lock (one op per session), reaper for
+  idle sessions (env `SESSION_TTL_MS` / `SWEEP_MS`). Split into `server`/`sessions`/`http`/`carriers/registry`.
+- `AllstateCarrier` working end to end on the LIVE portal via Browserbase (residential proxy):
+  email-tab login, MFA (SMS + `#pinCode`) or trusted-device no-MFA, and real PDF download.
+  Returns base64 PDFs behind the `Carrier` interface. Verified: 3 real PDFs.
+- Pre-warm: `prepare()` (open + load form, no creds) + `/prepare`; `/login` reuses a warm
+  session by `warmId`. Frontend fires `/prepare` on carrier select.
+- Frontend: full login -> MFA -> render; PDFs shown inline via blob URLs + download links;
+  client-side submit->on-screen timing.
+- Latency: per-step `[timing]` logs + optimizations (region us-east-1, killed CSS animations,
+  parallel-ish downloads, tab-click moved into pre-warm). No-MFA total ~27s (local dev).
+- Tests: `documents`, `http` (requireStrings), `sessions` (withLock). Exports 1-4 in `~/Infer_notes`.
+
+Graded latency = "MFA submission -> document on screen" (= `submitMfa` + `fetchDocuments`, ~12-15s),
+NOT full login. Biggest remaining: `nav-docs` (~5.8s), downloads (~4.8s).
 
 Next:
-- Browser layer (Browserbase + Playwright), held across the MFA pause.
-- Real carrier MAPFRE (blocked on working creds), then a second carrier.
-- Latency instrumentation (~8s), then deploy off the machine.
-- Deferred: busy-lock, session reaper, `/health`, `/carriers`, `DELETE /session/:id`. See `assumptions.md` for the error-handling TODO list.
+- SECOND carrier (spec needs 2; Allstate alone = auto-reject).
+- Cut nav-docs/downloads latency (internal `GetUdpRetrieveDocument` JSON API is the big lever,
+  CSRF risk, deferred); parallelize `fetch-bytes`.
+- Deploy off the machine in us-east-1 (same region as the Browserbase session); not serverless.
+- Verify the MFA path live (Allstate keeps skipping MFA). Wire `contextId` into `openSession`
+  to make Context reuse actually live (currently plumbed but unused). Defensive hardening
+  (Identity Restoration modal, multi-policy). README + Loom.
 
 ## Architecture invariants
 
@@ -66,7 +85,20 @@ Use these specialized agents for the work they fit. Prefer them over writing bli
 
 ## Gotchas
 
-- GEICO renters is underwritten by Homesite, so the policy may live on a separate portal, not geico.com.
-- Allstate's login form is in shadow DOM. Playwright locators pierce it; plain `querySelectorAll` will not see the inputs.
-- The credentialed login POST gets anti-bot blocked from a datacenter IP. Residential proxies are required.
-- dotenv values that start with `#` must be wrapped in quotes or they parse as empty.
+- Allstate login selectors: email tab `#UserIDdisplay`, `#emailAddress`, `input[type=password]:visible`,
+  submit `button[name=frmButton]:visible`. It's an SPA: wait for elements, not load events.
+- A direct `goto` to the docs URL (`/secured/documents/policy-documents`) redirects to the dashboard.
+  Navigate via the Policies dropdown -> the `Documents for ... policy` button instead.
+- Docs download as a blob via a popup. `download.saveAs()` / `page.evaluate` do NOT get the bytes
+  on Browserbase (remote file). Use CDP `Browser.setDownloadBehavior({downloadPath:"downloads"})`,
+  then the Browserbase Downloads API (`GET /v1/downloads?sessionId`, then `GET /v1/downloads/{id}`).
+- Per-action latency is dominated by CDP round-trip distance. Set the session `region` near the
+  compute (us-east-1) and deploy the app in the SAME region. Roughly 2x on form actions.
+- Render PDFs with blob URLs, not `data:` (data: in an iframe is blocked in Chrome 112+).
+- Allstate MFA is intermittent (often goes straight to dashboard). Don't assume MFA; the carrier
+  races dashboard-vs-verification. Hard to force MFA, so the live MFA path is under-verified.
+- `.env` values starting with `#` must be quoted or `--env-file` reads them empty (the Allstate
+  password starts with `#`).
+- Anti-bot is priority #1: keep the residential proxy on; avoid `evaluate`-based fills
+  (isTrusted:false -> Akamai flag) and aggressive parallelism. The internal `GetUdpRetrieveDocument`
+  JSON API backs the doc download (big latency lever, but likely CSRF-guarded; deferred).
