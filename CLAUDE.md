@@ -33,6 +33,18 @@ Do not break these without a deliberate decision:
 - Vite + React frontend (kept ugly per spec, functionality over polish)
 - Playwright + Browserbase for browser automation
 
+## Agents to consult when building
+
+Use these specialized agents for the work they fit. Prefer them over writing blind.
+
+- typescript-pro: default for writing app code. The whole stack is TypeScript.
+- backend-developer: long-running Express server, in-memory session Map, MFA-pause state machine, busy-lock. The core of the project.
+- frontend-developer: the ugly Vite + React UI (carrier dropdown, creds form, MFA prompt, doc viewer).
+- performance-engineer: the ~8s latency budget. Instrument step timings, tune the login to docs path.
+- security-auditor: credential-handling pass. Enforce that creds are never logged or persisted. Run before submit.
+- deployment-engineer: hosting off the machine. Deploy the long-running backend (not serverless) plus the frontend.
+- code-reviewer: review pass before the final submit and Loom.
+
 ## Dev workflow
 
 - Build and test against the mock carrier. It implements the same `Carrier` interface and simulates login, MFA, and document return.
