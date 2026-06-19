@@ -85,6 +85,12 @@ test("POST /mfa wrong code maps to 401", async () => {
     assert.equal(mfa.status, 401);
 });
 
+test("a document-fetch failure after login maps to 502", async () => {
+    const { status, body } = await post("/login", { carrier: "mock", username: "docfail", password: "p" });
+    assert.equal(status, 502); // DocumentsUnavailableError
+    assert.ok(body.error);
+});
+
 test("POST /mfa for an unknown session is 404", async () => {
     const { status } = await post("/mfa", { sessionId: "does-not-exist", code: "123456" });
     assert.equal(status, 404);

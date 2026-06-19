@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { withLock, BusyError, type Session } from "../src/sessions.js";
+import { withLock, BusyError, fetchAndFinish, sessions, type Session } from "../src/sessions.js";
+import type { Carrier } from "../src/types.js";
 
 // withLock only touches session.inFlight, so a bare object is enough here.
 const makeSession = () => ({}) as Session;
@@ -28,4 +29,22 @@ test("withLock frees the lock even when the work throws", async () => {
   }));
   assert.equal(s.inFlight, undefined);
   assert.equal(await withLock(s, async () => "ok"), "ok");
+});
+
+test("fetchAndFinish closes the browser and drops the session even when the fetch throws", async () => {
+  let closed = false;
+  const carrier: Carrier = {
+    name: "stub",
+    async prepare() {},
+    async login() { return { mfaRequired: false }; },
+    async submitMfa() {},
+    async fetchDocuments() { throw new Error("doc fetch blew up"); },
+    async close() { closed = true; },
+  };
+  const id = "stub-session";
+  sessions.set(id, { state: "FETCHING_DOCS", carrier, lastActivity: 0 });
+
+  await assert.rejects(fetchAndFinish(id, sessions.get(id)!));
+  assert.equal(closed, true);            // browser released despite the throw (no leak)
+  assert.equal(sessions.has(id), false); // session dropped
 });
