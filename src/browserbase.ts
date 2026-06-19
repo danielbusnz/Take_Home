@@ -52,6 +52,8 @@ export class BrowserbaseSession {
             const r = await fetch(`https://api.browserbase.com/v1/downloads?sessionId=${this.id}`, {
                 headers: { "x-bb-api-key": API_KEY },
             });
+            // fetch only rejects on network errors, so check the status ourselves
+            if (!r.ok) throw new CarrierError(`Browserbase downloads list failed: ${r.status}`);
             const data = (await r.json()) as { downloads?: BbDownload[] };
             if ((data.downloads?.length ?? 0) >= min) return data.downloads!;
             await new Promise((res) => setTimeout(res, 1500));
@@ -64,6 +66,8 @@ export class BrowserbaseSession {
         const r = await fetch(`https://api.browserbase.com/v1/downloads/${id}`, {
             headers: { "x-bb-api-key": API_KEY, Accept: "application/octet-stream" },
         });
+        // don't base64-encode an error page as if it were the PDF
+        if (!r.ok) throw new CarrierError(`Browserbase download fetch failed: ${r.status}`);
         return Buffer.from(await r.arrayBuffer()).toString("base64");
     }
 
