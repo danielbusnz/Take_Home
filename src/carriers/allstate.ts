@@ -1,71 +1,31 @@
-import { chromium, type Browser, type Page } from "playwright";
-import Browserbase from "@browserbasehq/sdk";
 import type { Carrier, Document } from "../types.js";
-import { CarrierError, InvalidMfaError, DocumentsUnavailableError } from "../errors.js";
+import { InvalidMfaError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
+import { BrowserbaseSession, step } from "../browserbase.js";
 
 const LOGIN_URL =
     process.env.ALLSTATE_LOGIN_URL ?? "https://myaccountrwd.allstate.com/anon/account/login";
 const STEP_TIMEOUT = 30_000;
 
-type BbDownload = { id: string; filename: string; mimeType: string; size: number };
-
 // Real Allstate portal automation. Selectors confirmed against the live login:
 // email tab #UserIDdisplay, inputs #emailAddress + visible password, submit
 // button[name=frmButton]:visible. Login lands on /anon/verification (MFA).
+// Shared Browserbase plumbing (session + downloads) lives in BrowserbaseSession.
 export class AllstateCarrier implements Carrier {
     readonly name = "allstate";
     // mutable: set to the context we created during login, or the one passed in
     contextId: string | undefined;
-    private bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
-    private browser?: Browser;
-    private page?: Page;
-    private sessionId?: string;
+    private session?: BrowserbaseSession;
 
     constructor(contextId?: string) {
         this.contextId = contextId;
     }
 
-    // Open a Browserbase cloud browser on a residential proxy and grab its page.
-    private async openSession(): Promise<Page> {
-        const tCreate = Date.now();
-        const session = await this.bb.sessions.create({
-            projectId: process.env.BROWSERBASE_PROJECT_ID!,
-            proxies: true, // residential egress, beats datacenter-IP anti-bot
-            region: "us-east-1", // co-locate the browser near our compute; CDP RTT dominates per-action cost
-            timeout: 1800, // seconds: covers the human MFA pause
-        });
-        this.sessionId = session.id;
-        console.log(`[timing] session-create: ${Date.now() - tCreate}ms`);
-        const tConnect = Date.now();
-        this.browser = await chromium.connectOverCDP(session.connectUrl);
-        const context = this.browser.contexts()[0];
-        this.page = context.pages()[0]; // Browserbase hands us the page
-        // required so Browserbase syncs downloaded files to its cloud storage
-        const cdp = await context.newCDPSession(this.page);
-        await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: "downloads", eventsEnabled: true });
-        console.log(`[timing] cdp-connect+config: ${Date.now() - tConnect}ms`);
-        return this.page;
-    }
-
-    // Wrap a fragile browser step: let our own typed errors through, but turn an
-    // unexpected failure (e.g. a changed selector) into a clean error plus a saved
-    // screenshot for debugging, instead of a raw crash. Refine error types later.
-    private async step<T>(name: string, fn: () => Promise<T>): Promise<T> {
-        try {
-            return await fn();
-        } catch (e) {
-            if (e instanceof CarrierError) throw e; // our intentional errors pass through
-            console.error(`allstate ${name} failed:`, e);
-            await this.page?.screenshot({ path: `/tmp/allstate-fail-${name}.png` }).catch(() => {});
-            throw new CarrierError(`allstate ${name} failed`);
-        }
-    }
-
     // Open the browser and load the login form. No credentials needed, so this
     // can run ahead of login() to pre-warm while the user is still typing.
     async prepare(): Promise<void> {
-        const page = await this.openSession();
+        this.session = await BrowserbaseSession.open();
+        const page = this.session.page;
         // Kill CSS animations/transitions so Playwright's click "stability" waits
         // don't burn time. addInitScript re-applies on every navigation in the flow.
         await page.addInitScript(
@@ -76,7 +36,7 @@ export class AllstateCarrier implements Carrier {
         console.log(`[timing] goto: ${Date.now() - tGoto}ms`);
         // SPA: wait for the form to actually render, not just the load event
         const tForm = Date.now();
-        await this.step("login-form", () => page.locator("#UserIDdisplay").waitFor({ timeout: STEP_TIMEOUT }));
+        await step(page, "allstate login-form", () => page.locator("#UserIDdisplay").waitFor({ timeout: STEP_TIMEOUT }));
         console.log(`[timing] form-hydrate: ${Date.now() - tForm}ms`);
         // open the Email tab now (no credentials needed) so login() only types + submits
         await page.locator("#UserIDdisplay").click();
@@ -84,8 +44,8 @@ export class AllstateCarrier implements Carrier {
     }
 
     async login(username: string, password: string): Promise<{ mfaRequired: boolean }> {
-        if (!this.page) await this.prepare(); // not pre-warmed: open + load the form now
-        const page = this.page!;
+        if (!this.session) await this.prepare(); // not pre-warmed: open + load the form now
+        const page = this.session!.page;
 
         const tSubmit = Date.now();
         // Email tab already opened in prepare(); just type the creds and submit.
@@ -114,7 +74,7 @@ export class AllstateCarrier implements Carrier {
     }
 
     async submitMfa(code: string): Promise<void> {
-        const page = this.page!;
+        const page = this.session!.page;
         await page.locator("#pinCode").fill(code);
         await page.getByRole("button", { name: /continue|verify|submit/i }).first().click();
         try {
@@ -125,7 +85,7 @@ export class AllstateCarrier implements Carrier {
     }
 
     async fetchDocuments(): Promise<Document[]> {
-        const page = this.page!;
+        const page = this.session!.page;
         // navigate the way the UI does: Policies dropdown -> Documents.
         // (a direct goto to the docs URL redirects back to the dashboard.)
         const tNav = Date.now();
@@ -164,7 +124,7 @@ export class AllstateCarrier implements Carrier {
 
         // pull the synced files out of Browserbase and pair them to the titles
         const tList = Date.now();
-        const downloads = await this.retrieveDownloads(names.length);
+        const downloads = await this.session!.waitForDownloads(names.length);
         console.log(`[timing] retrieve-list: ${Date.now() - tList}ms`);
         const byName = new Map(downloads.map((d) => [d.filename, d]));
         const tBytes = Date.now();
@@ -175,37 +135,14 @@ export class AllstateCarrier implements Carrier {
             docs.push({
                 name: names[i],
                 contentType: meta.mimeType || "application/pdf",
-                bytes: await this.fetchDownloadBytes(meta.id),
+                bytes: await this.session!.fetchBytes(meta.id),
             });
         }
         console.log(`[timing] fetch-bytes: ${Date.now() - tBytes}ms`);
         return validateDocuments(this.name, docs);
     }
 
-    // List the session's downloads from Browserbase, retrying until they sync.
-    private async retrieveDownloads(min: number): Promise<BbDownload[]> {
-        const key = process.env.BROWSERBASE_API_KEY!;
-        for (let i = 0; i < 15; i++) {
-            const r = await fetch(`https://api.browserbase.com/v1/downloads?sessionId=${this.sessionId}`, {
-                headers: { "x-bb-api-key": key },
-            });
-            const data = (await r.json()) as { downloads?: BbDownload[] };
-            if ((data.downloads?.length ?? 0) >= min) return data.downloads!;
-            await new Promise((res) => setTimeout(res, 1500));
-        }
-        throw new DocumentsUnavailableError("documents did not sync from the browser in time");
-    }
-
-    // Fetch one download's bytes from Browserbase as base64.
-    private async fetchDownloadBytes(id: string): Promise<string> {
-        const key = process.env.BROWSERBASE_API_KEY!;
-        const r = await fetch(`https://api.browserbase.com/v1/downloads/${id}`, {
-            headers: { "x-bb-api-key": key, Accept: "application/octet-stream" },
-        });
-        return Buffer.from(await r.arrayBuffer()).toString("base64");
-    }
-
     async close(): Promise<void> {
-        await this.browser?.close();
+        await this.session?.close();
     }
 }
