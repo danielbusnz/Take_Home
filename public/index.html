@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Policy Puller</title>
+<h1>Policy Puller</h1>
+
+<div id="login">
+  <select id="carrier"><option value="mock">mock</option></select><br />
+  <input id="username" placeholder="username" /><br />
+  <input id="password" type="password" placeholder="password" /><br />
+  <button onclick="login()">Log in</button>
+</div>
+
+<div id="mfa" hidden>
+  <input id="code" placeholder="MFA code" /><br />
+  <button onclick="submitMfa()">Submit code</button>
+</div>
+
+<pre id="status"></pre>
+<div id="docs"></div>
+
+<script>
+  let sessionId = null;
+
+  async function post(path, body) {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { ok: res.ok, data: await res.json() };
+  }
+
+  const show = (msg) => (document.getElementById("status").textContent = msg);
+
+  function render(documents) {
+    document.getElementById("docs").innerHTML = documents
+      .map((d) => {
+        const url = `data:${d.contentType};base64,${d.bytes}`;
+        return `<p>${d.name} (${d.contentType})</p>
+          <iframe src="${url}" width="100%" height="400"></iframe>
+          <a download="${d.name}" href="${url}">download</a>`;
+      })
+      .join("");
+  }
+
+  async function login() {
+    const { ok, data } = await post("/login", {
+      carrier: document.getElementById("carrier").value,
+      username: document.getElementById("username").value,
+      password: document.getElementById("password").value,
+    });
+    if (!ok) return show("error: " + data.error);
+    if (data.status === "done") {
+      show("logged in, no MFA");
+      return render(data.documents);
+    }
+    sessionId = data.sessionId;
+    document.getElementById("mfa").hidden = false;
+    show("MFA needed, enter your code");
+  }
+
+  async function submitMfa() {
+    const { ok, data } = await post("/mfa", {
+      sessionId,
+      code: document.getElementById("code").value,
+    });
+    if (!ok) return show("error: " + data.error);
+    show("done");
+    render(data.documents);
+  }
+</script>

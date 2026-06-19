@@ -8,11 +8,25 @@ Web app that pulls a user's insurance policy documents from carrier portals via 
 
 ## Commands
 
-To be filled in once scaffolded.
+- Dev (watch): `npm run dev`
+- Start: `npm start`
+- Tests: `npm test`
 
-- Server (dev): TBD
-- Web (dev): TBD
-- Tests: TBD
+Server runs on http://localhost:3000 and serves the frontend at `/`.
+
+## Progress (2026-06-18)
+
+Done:
+- Backend flow: `/login` and `/mfa`, in-memory session `Map`, state machine, typed carrier errors mapped to HTTP codes, cleanup on failure.
+- `MockCarrier` simulating bad creds, MFA, no-MFA, and document fetch.
+- Document validation + logging (`documents.ts`) with tests.
+- Frontend MVP (`public/index.html`): dropdown, creds form, MFA prompt, doc viewer. Works end to end against the mock.
+
+Next:
+- Browser layer (Browserbase + Playwright), held across the MFA pause.
+- Real carrier MAPFRE (blocked on working creds), then a second carrier.
+- Latency instrumentation (~8s), then deploy off the machine.
+- Deferred: busy-lock, session reaper, `/health`, `/carriers`, `DELETE /session/:id`. See `assumptions.md` for the error-handling TODO list.
 
 ## Architecture invariants
 
@@ -21,7 +35,7 @@ Do not break these without a deliberate decision:
 - Backend is long-running. It holds the live browser session across the MFA pause. Not serverless.
 - No database. Session state lives in an in-memory `Map` keyed by sessionId.
 - Credentials are never logged or persisted. In memory only, discarded after use.
-- Every carrier implements one `Carrier` interface. Scraping is bespoke per carrier; output is normalized to `{ name, bytes }`.
+- Every carrier implements one `Carrier` interface. Scraping is bespoke per carrier; output is normalized to `{ name, contentType, bytes }`.
 - A browser session is a single resource. Serialize operations against it with a busy lock.
 - Real carriers run on Browserbase. Residential proxies are paid and needed to beat anti-bot.
 - Latency target: ~8s machine time, login to documents, excluding human MFA entry. Instrument step timings.
@@ -30,7 +44,7 @@ Do not break these without a deliberate decision:
 
 - TypeScript throughout
 - Express backend (long-running)
-- Vite + React frontend (kept ugly per spec, functionality over polish)
+- Single static HTML page (`public/index.html`) served by Express, vanilla JS, no build step. Kept ugly per spec.
 - Playwright + Browserbase for browser automation
 
 ## Agents to consult when building
