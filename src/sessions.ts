@@ -28,12 +28,16 @@ export function withLock<T>(session: Session, fn: () => Promise<T>): Promise<T> 
 
 // Fetch docs, close the browser, drop the session. Shared by both endpoints.
 export async function fetchAndFinish(sessionId: string, session: Session) {
-    session.state = "FETCHING_DOCS";
-    const documents = await session.carrier.fetchDocuments();
-    session.state = "DONE";
-    await session.carrier.close();
-    sessions.delete(sessionId);
-    return documents;
+    try {
+        session.state = "FETCHING_DOCS";
+        const documents = await session.carrier.fetchDocuments();
+        session.state = "DONE";
+        return documents;
+    } finally {
+        // always release the browser + drop the session, even if the fetch threw
+        await session.carrier.close();
+        sessions.delete(sessionId);
+    }
 }
 
 // Close the browser and drop the session after a failure. Never throws.
