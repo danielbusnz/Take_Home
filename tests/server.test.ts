@@ -85,6 +85,17 @@ test("POST /mfa wrong code maps to 401", async () => {
     assert.equal(mfa.status, 401);
 });
 
+test("wrong MFA code keeps the session so the user can retry", async () => {
+    const login = await post("/login", { carrier: "mock", username: "carol", password: "p" });
+    const bad = await post("/mfa", { sessionId: login.body.sessionId, code: "000000" });
+    assert.equal(bad.status, 401);
+    // the session must survive: retry with the correct code on the SAME session
+    const good = await post("/mfa", { sessionId: login.body.sessionId, code: "123456" });
+    assert.equal(good.status, 200);
+    assert.equal(good.body.status, "done");
+    assert.equal(good.body.documents.length, 1);
+});
+
 test("a document-fetch failure after login maps to 502", async () => {
     const { status, body } = await post("/login", { carrier: "mock", username: "docfail", password: "p" });
     assert.equal(status, 502); // DocumentsUnavailableError

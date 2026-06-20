@@ -11,6 +11,7 @@ import {
     cleanup,
 } from "./sessions.js";
 import { requireStrings, sendError } from "./http.js";
+import { InvalidMfaError } from "./errors.js";
 
 // Builds the Express app and its routes. No side effects (no listen, no reaper)
 // so tests can import and drive it; server.ts wires up startup separately.
@@ -113,6 +114,12 @@ app.post("/mfa", async (req, res) => {
         return res.json({ status: "done", documents } satisfies MfaResponse);
     } catch (e) {
         if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
+        // a wrong/expired code is recoverable: rewind to AWAITING_MFA and keep the
+        // session so the user can retry, instead of tearing the whole login down.
+        if (e instanceof InvalidMfaError) {
+            session.state = "AWAITING_MFA";
+            return sendError(res, e); // maps to 401
+        }
         await cleanup(sessionId);
         return sendError(res, e);
     }
