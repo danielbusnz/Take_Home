@@ -21,31 +21,38 @@ Endpoints: `GET /carriers`, `POST /prepare`, `POST /login`, `POST /mfa`.
 ## Progress (2026-06-19)
 
 Done:
+- **Two carriers end to end** (spec gate met): `AllstateCarrier` (email login, SMS MFA or
+  trusted-device, real PDFs) and `AssurantCarrier` (Okta login + SMS MFA, Confirmation of
+  Coverage PDF). Both via Browserbase residential proxy, behind the `Carrier` interface.
 - Backend: `/login`, `/mfa`, `/carriers`, `/prepare`. In-memory session Map, state machine,
-  typed errors -> HTTP codes, 400 input guards, busy-lock (one op per session), reaper for
-  idle sessions (env `SESSION_TTL_MS` / `SWEEP_MS`). Split into `server`/`sessions`/`http`/`carriers/registry`.
-- `AllstateCarrier` working end to end on the LIVE portal via Browserbase (residential proxy):
-  email-tab login, MFA (SMS + `#pinCode`) or trusted-device no-MFA, and real PDF download.
-  Returns base64 PDFs behind the `Carrier` interface. Verified: 3 real PDFs.
-- Pre-warm: `prepare()` (open + load form, no creds) + `/prepare`; `/login` reuses a warm
-  session by `warmId`. Frontend fires `/prepare` on carrier select.
-- Frontend: full login -> MFA -> render; PDFs shown inline via blob URLs + download links;
-  client-side submit->on-screen timing.
-- Latency: per-step `[timing]` logs + optimizations (region us-east-1, killed CSS animations,
-  parallel-ish downloads, tab-click moved into pre-warm). No-MFA total ~27s (local dev).
-- Tests: `documents`, `http` (requireStrings), `sessions` (withLock). Exports 1-4 in `~/Infer_notes`.
+  typed errors -> HTTP, 400 guards, busy-lock (on /login, /prepare, /mfa), reaper. Split into
+  `server`/`app`/`sessions`/`http`/`carriers/registry` + shared `browserbase.ts`.
+- `BrowserbaseSession` helper (open, waitForDownloads, fetchBytes, collectDocuments, step,
+  requireSession); both real carriers compose it. Removed dead `contextId`/`contexts` plumbing.
+- **Deployed live: https://take-home-policy-puller.fly.dev** (Fly, single machine, `iad`/us-east-1,
+  Dockerfile). Off-machine, not serverless, no DB.
+- **CI** (GitHub Actions): `tsc --noEmit` + mock-driven endpoint tests, green on push/PR.
+- Pre-warm (`/prepare` + `warmId`); frontend full login->MFA->render (blob-URL PDFs), now with
+  network-error handling, button reset, blob-URL cleanup.
+- **Hardened from a chaos/QA break-it pass:** JSON error responses (no HTML stack-trace leaks),
+  MFA retry keeps the session, empty doc result -> 502, in-use/mismatched `warmId` handled,
+  `fetchAndFinish` closes the browser on throw, `r.ok` checks on Browserbase fetches, `requireSession` guards.
+- Tests: `documents`, `http`, `sessions` (+ fetchAndFinish), `server` (endpoint integration via mock). 32 green.
+- **Latency: see `latency.md`.** Assurant ~7.8s (meets ~8s target). Allstate UI ~12s; a working
+  **full-API path on branch `allstate-api-experiment` is ~6-7s and reliable** (direct JSON endpoints).
+- Exports 1-5 in `~/Infer_notes` (this session = export-6). Deferred items in `known-issues.md`.
 
-Graded latency = "MFA submission -> document on screen" (= `submitMfa` + `fetchDocuments`, ~12-15s),
-NOT full login. Biggest remaining: `nav-docs` (~5.8s), downloads (~4.8s).
+Graded latency = "MFA submission -> document on screen" (`submitMfa` + `fetchDocuments`). Measure on
+prod (co-located). Allstate often skips MFA, so its graded span is mostly `fetchDocuments`.
 
 Next:
-- SECOND carrier (spec needs 2; Allstate alone = auto-reject).
-- Cut nav-docs/downloads latency (internal `GetUdpRetrieveDocument` JSON API is the big lever,
-  CSRF risk, deferred); parallelize `fetch-bytes`.
-- Deploy off the machine in us-east-1 (same region as the Browserbase session); not serverless.
-- Verify the MFA path live (Allstate keeps skipping MFA). Wire `contextId` into `openSession`
-  to make Context reuse actually live (currently plumbed but unused). Defensive hardening
-  (Identity Restoration modal, multi-policy). README + Loom.
+- **Decide Allstate doc-fetch for `main`:** full-API (~6-7s, branch) vs hybrid vs current UI (~12s).
+  See `latency.md`; verify `page.request` source-IP on prod first.
+- **Redeploy `main` to prod** (prod is several commits behind `main`).
+- Deferred resilience: no request/operation timeout (`known-issues.md` #2).
+- README full version + Loom (remaining deliverables).
+- Smaller chaos/QA items: rate-limit `/prepare`, wire/throw `AntiBotError`/`CarrierTimeoutError`,
+  reaper-vs-MFA-pause TTL, multi-policy.
 
 ## Architecture invariants
 
@@ -100,5 +107,8 @@ Use these specialized agents for the work they fit. Prefer them over writing bli
 - `.env` values starting with `#` must be quoted or `--env-file` reads them empty (the Allstate
   password starts with `#`).
 - Anti-bot is priority #1: keep the residential proxy on; avoid `evaluate`-based fills
-  (isTrusted:false -> Akamai flag) and aggressive parallelism. The internal `GetUdpRetrieveDocument`
-  JSON API backs the doc download (big latency lever, but likely CSRF-guarded; deferred).
+  (isTrusted:false -> Akamai flag) and aggressive parallelism.
+- Allstate's internal document JSON API works in-browser and is the big latency lever (~12s -> ~6-7s).
+  Cracked on branch `allstate-api-experiment`; full details + gotchas (CSRF must be
+  `decodeURIComponent(XSRF-TOKEN)`, the `GetDocumentsForPolicies` context primer, JSON-string body)
+  in `latency.md`. It is NOT anti-bot-gated (Akamai `_abck=-1` but `/api/secured` returns 200).
