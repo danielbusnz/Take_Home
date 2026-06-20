@@ -45,8 +45,10 @@ export interface Carrier {
     login(username: string, password: string): Promise<{ mfaRequired: boolean }>;
     // type the MFA code the user received.
     submitMfa(code: string): Promise<void>;
-    // pull the policy documents once logged in.
-    fetchDocuments(): Promise<Document[]>;
+    // pull the policy documents once logged in. onDoc, if given, is called as each
+    // document's bytes arrive, so the server can stream them and the UI can paint the
+    // first PDF before the slowest one finishes.
+    fetchDocuments(onDoc?: (doc: Document) => void): Promise<Document[]>;
     // tear down the browser session.
     close(): Promise<void>;
 }

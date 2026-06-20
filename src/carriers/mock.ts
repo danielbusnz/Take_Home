@@ -40,11 +40,12 @@ export class MockCarrier implements Carrier {
         this.loggedIn = true;
     }
 
-    async fetchDocuments(): Promise<Document[]> {
+    async fetchDocuments(onDoc?: (doc: Document) => void): Promise<Document[]> {
         if (this.failDocs) throw new DocumentsUnavailableError("simulated document fetch failure");
         const docs: Document[] = [
             { name: "declarations.pdf", contentType: "application/pdf", bytes: SAMPLE_PDF },
         ];
+        for (const d of docs) onDoc?.(d);
         return validateDocuments(this.name, docs);
     }
 

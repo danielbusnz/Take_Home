@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Carrier, SessionState } from "./types.js";
+import type { Carrier, Document, SessionState } from "./types.js";
 
 // sessionId -> the live session. This Map is the entire "database".
 // inFlight holds the current operation on this session's browser, so a second
@@ -65,10 +65,10 @@ export async function fetchAndFinish(sessionId: string, session: Session) {
 // it for reuse instead of closing it. A repeat login with the same credentials
 // (credHash) then refetches on this live session. On a fetch failure we still
 // tear down (a broken session must not be cached).
-export async function fetchAndKeep(sessionId: string, session: Session, credHash: string) {
+export async function fetchAndKeep(sessionId: string, session: Session, credHash: string, onDoc?: (doc: Document) => void) {
     try {
         session.state = "FETCHING_DOCS";
-        const documents = await session.carrier.fetchDocuments();
+        const documents = await session.carrier.fetchDocuments(onDoc);
         session.state = "DONE";
         session.credHash = credHash;
         session.keepUntil = Date.now() + REUSE_TTL_MS;
@@ -85,9 +85,9 @@ export async function fetchAndKeep(sessionId: string, session: Session, credHash
 
 // Refetch on an already-authenticated, kept-alive session (reuse path). Extends
 // the keep-alive window. The caller holds the lock.
-export async function refetchOnWarm(session: Session) {
+export async function refetchOnWarm(session: Session, onDoc?: (doc: Document) => void) {
     session.state = "FETCHING_DOCS";
-    const documents = await session.carrier.fetchDocuments();
+    const documents = await session.carrier.fetchDocuments(onDoc);
     session.state = "DONE";
     session.keepUntil = Date.now() + REUSE_TTL_MS;
     session.lastActivity = Date.now();

@@ -169,6 +169,36 @@ test("a wrong password cannot reach the cached session (different key)", async (
     assert.notEqual(second.body.sessionId, first.body.sessionId); // fresh session, no reuse
 });
 
+test("streaming: Accept ndjson streams a doc line then a done line", async () => {
+    const res = await fetch(base + "/login", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/x-ndjson" },
+        body: JSON.stringify({ carrier: "mock", username: "nomfa", password: "p" }),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") || "", /application\/x-ndjson/);
+    const msgs = (await res.text()).trim().split("\n").map((l) => JSON.parse(l));
+    const docs = msgs.filter((m) => m.type === "doc");
+    const done = msgs.find((m) => m.type === "done");
+    assert.equal(docs.length, 1); // mock streams its one doc
+    assert.equal(docs[0].document.name, "declarations.pdf");
+    assert.ok(done && typeof done.gradedMs === "number");
+    assert.equal(done.documents.length, 1); // full set carried in done as a fallback
+});
+
+test("streaming: a login that needs MFA still returns JSON, not a stream", async () => {
+    const res = await fetch(base + "/login", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/x-ndjson" },
+        body: JSON.stringify({ carrier: "mock", username: "alice", password: "p" }),
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get("content-type") || "", /application\/json/);
+    const body = (await res.json()) as Record<string, any>;
+    assert.equal(body.status, "mfa_needed");
+    assert.ok(body.sessionId);
+});
+
 // --- errors that happen outside a route handler must still return JSON, no stack ---
 
 const leak = /node_modules|\/home\/|SyntaxError|\bat /; // signs of a leaked stack trace

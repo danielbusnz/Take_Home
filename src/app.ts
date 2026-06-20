@@ -1,6 +1,6 @@
-import express, { type ErrorRequestHandler } from "express";
+import express, { type ErrorRequestHandler, type Request, type Response } from "express";
 import { randomUUID } from "node:crypto";
-import type { LoginResponse, MfaResponse } from "./types.js";
+import type { LoginResponse, MfaResponse, Document } from "./types.js";
 import { carriers } from "./carriers/registry.js";
 import {
     type Session,
@@ -29,6 +29,43 @@ app.use(express.static("public")); // serve the static frontend
 app.get("/carriers", (_req, res) =>
     res.json({ carriers: Object.keys(carriers).filter((c) => c !== "mock") }),
 );
+
+// The frontend asks for NDJSON so each PDF can paint as it arrives; everything else
+// (tests, scripts, the reuse path) gets a single JSON response.
+function wantsStream(req: Request): boolean {
+    return (req.headers.accept || "").includes("application/x-ndjson");
+}
+
+// Fetch documents and respond. When the client asked for NDJSON, stream one
+// {type:"doc"} line per document as its bytes land, then a final {type:"done"} (which
+// also carries the full document set as a fallback for carriers that do not stream).
+// `run` gets the onDoc callback and returns the full result.
+async function streamOrJson(
+    req: Request,
+    res: Response,
+    extra: Record<string, unknown>,
+    run: (onDoc: (doc: Document) => void) => Promise<{ documents: Document[]; gradedMs: number }>,
+) {
+    if (!wantsStream(req)) {
+        const { documents, gradedMs } = await run(() => {});
+        return res.json({ status: "done", documents, gradedMs, ...extra });
+    }
+    res.setHeader("content-type", "application/x-ndjson");
+    const onDoc = (doc: Document) => res.write(JSON.stringify({ type: "doc", document: doc }) + "\n");
+    const { documents, gradedMs } = await run(onDoc);
+    res.write(JSON.stringify({ type: "done", documents, gradedMs, ...extra }) + "\n");
+    res.end();
+}
+
+// Report a failure. Once streaming has started the status code is already sent, so we
+// write a {type:"error"} line instead of a JSON status response.
+function failResponse(res: Response, e: unknown) {
+    if (res.headersSent) {
+        try { res.write(JSON.stringify({ type: "error", error: (e as Error)?.message || "error" }) + "\n"); } catch { }
+        return res.end();
+    }
+    return sendError(res, e);
+}
 
 // Speculative pre-warm: open the browser and load the login form ahead of time
 // (while the user types), so /login can skip ~11s of session + page load.
@@ -118,26 +155,31 @@ app.post("/login", async (req, res) => {
     session.credHash = credHash; // so a later /mfa caches under the same reuse key
 
     try {
-        // hold the lock for the whole login so a double-submit is rejected (409)
-        // and the reaper can't close the browser mid-login
-        const result = await withLock(session, async () => {
+        // hold the lock for the whole login and doc fetch so a double-submit is
+        // rejected (409) and the reaper can't close the browser mid-login
+        let mfaNeeded = false;
+        await withLock(session, async () => {
             const { mfaRequired } = await session.carrier.login(username, password);
             if (mfaRequired) {
                 session.state = "AWAITING_MFA";
-                return { status: "mfa_needed", sessionId } satisfies LoginResponse;
+                mfaNeeded = true;
+                return;
             }
-            // trusted device, no MFA: go straight to documents, keep session for reuse
+            // trusted device, no MFA: fetch and respond, streaming if the client asked
             const tGraded = Date.now();
-            const documents = await fetchAndKeep(sessionId, session, credHash);
-            const gradedMs = Date.now() - tGraded;
-            console.log(`[timing] GRADED login->docs (no mfa): ${gradedMs}ms`);
-            return { status: "done", sessionId, documents, gradedMs } satisfies LoginResponse;
+            await streamOrJson(req, res, { sessionId }, async (onDoc) => {
+                const documents = await fetchAndKeep(sessionId, session, credHash, onDoc);
+                const gradedMs = Date.now() - tGraded;
+                console.log(`[timing] GRADED login->docs (no mfa): ${gradedMs}ms`);
+                return { documents, gradedMs };
+            });
         });
-        return res.json(result);
+        if (mfaNeeded) return res.json({ status: "mfa_needed", sessionId } satisfies LoginResponse);
+        return; // streamOrJson already responded
     } catch (e) {
         if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         await cleanup(sessionId);
-        return sendError(res, e);
+        return failResponse(res, e);
     }
 });
 
@@ -153,27 +195,31 @@ app.post("/mfa", async (req, res) => {
 
     try {
         const tGraded = Date.now();
-        const documents = await withLock(session, async () => {
+        await withLock(session, async () => {
             session.state = "SUBMITTING_MFA";
             await session.carrier.submitMfa(code);
-            // keep the authenticated session for reuse (credHash was set in /login)
-            return session.credHash
-                ? fetchAndKeep(sessionId, session, session.credHash)
-                : fetchAndFinish(sessionId, session);
+            // keep the authenticated session for reuse (credHash was set in /login),
+            // streaming each document if the client asked
+            await streamOrJson(req, res, {}, async (onDoc) => {
+                const documents = session.credHash
+                    ? await fetchAndKeep(sessionId, session, session.credHash, onDoc)
+                    : await fetchAndFinish(sessionId, session);
+                const gradedMs = Date.now() - tGraded;
+                console.log(`[timing] GRADED mfa-submit->docs: ${gradedMs}ms`);
+                return { documents, gradedMs };
+            });
         });
-        const gradedMs = Date.now() - tGraded;
-        console.log(`[timing] GRADED mfa-submit->docs: ${gradedMs}ms`);
-        return res.json({ status: "done", documents, gradedMs } satisfies MfaResponse);
+        return; // streamOrJson already responded
     } catch (e) {
         if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         // a wrong/expired code is recoverable: rewind to AWAITING_MFA and keep the
         // session so the user can retry, instead of tearing the whole login down.
         if (e instanceof InvalidMfaError) {
             session.state = "AWAITING_MFA";
-            return sendError(res, e); // maps to 401
+            return failResponse(res, e); // maps to 401 (headers not yet sent here)
         }
         await cleanup(sessionId);
-        return sendError(res, e);
+        return failResponse(res, e);
     }
 });
 

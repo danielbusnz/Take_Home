@@ -98,103 +98,152 @@
       let mfaAt = 0; // MFA-submit click (the graded "MFA -> docs" start)
       let blobUrls = []; // object URLs from the last render, revoked on the next
 
-      async function post(path, body) {
+      // POST and handle the response, which is either a single JSON object (mfa_needed,
+      // done, or an error) or an NDJSON stream of {type:doc}/{type:done} so each PDF can
+      // paint the moment its bytes arrive. Returns a small tagged result for the caller.
+      async function submitTo(path, body) {
+        let res;
         try {
-          const res = await fetch(path, {
+          res = await fetch(path, {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: { "content-type": "application/json", accept: "application/x-ndjson" },
             body: JSON.stringify(body),
           });
-          return { ok: res.ok, data: await res.json() };
         } catch {
-          // network failure or a non-JSON response: report via the !ok path
-          // instead of throwing out of the handler and wedging the button.
-          return { ok: false, data: { error: "could not reach the server" } };
+          return { kind: "error", error: "could not reach the server" };
         }
+        const ct = res.headers.get("content-type") || "";
+        if (!ct.includes("application/x-ndjson")) {
+          // single JSON: mfa_needed, done (e.g. the reuse path), or an error status
+          const data = await res.json().catch(() => ({ error: "bad response" }));
+          if (!res.ok) return { kind: "error", error: data.error || "request failed" };
+          if (data.status === "mfa_needed") return { kind: "mfa", sessionId: data.sessionId };
+          return { kind: "done", documents: data.documents || [], gradedMs: data.gradedMs };
+        }
+        // NDJSON: render each document the moment its line arrives
+        clearDocs();
+        let rendered = 0, gradedMs = null, firstAt = null, fallback = [];
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line) continue;
+            let msg;
+            try { msg = JSON.parse(line); } catch { continue; }
+            if (msg.type === "doc") {
+              if (firstAt === null) firstAt = performance.now();
+              renderOne(msg.document);
+              show(`rendering documents... (${++rendered})`);
+            } else if (msg.type === "done") {
+              gradedMs = msg.gradedMs;
+              fallback = msg.documents || [];
+            } else if (msg.type === "error") {
+              return { kind: "error", error: msg.error || "document fetch failed" };
+            }
+          }
+        }
+        // carriers that did not stream (no doc lines): render the full set from done
+        if (rendered === 0) fallback.forEach(renderOne);
+        return { kind: "streamed", gradedMs, firstAt };
       }
 
       async function login() {
         $("login-btn").disabled = true;
         submitAt = performance.now();
-        // wait for any in-flight pre-warm so /login reuses the warm session instead
-        // of cold-starting a second prepare. If you submit before prepare finished,
-        // you wait the remainder here (still far better than a double prepare).
+        // wait for any in-flight pre-warm so /login reuses the warm session instead of
+        // cold-starting a second prepare.
         if (preparing) {
           show("Preparing session...");
           await preparing;
         }
         show("Logging in...");
-        const { ok, data } = await post("/login", {
+        const r = await submitTo("/login", {
           carrier: $("carrier").value,
           username: $("username").value.trim(),
           password: $("password").value,
           warmId,
         });
-        if (!ok) {
+        if (r.kind === "error") {
           $("login-btn").disabled = false;
-          return show("Error: " + (data.error || "login failed"));
+          return show("Error: " + r.error);
         }
-        if (data.status === "mfa_needed") {
-          sessionId = data.sessionId;
+        if (r.kind === "mfa") {
+          sessionId = r.sessionId;
           const mfa = $("mfa-section");
           mfa.hidden = false;
           mfa.removeAttribute("inert");
           $("code").focus();
           return show("Enter the code we sent you");
         }
-        finish(data.documents, data.gradedMs);
+        finish(r);
       }
 
       async function submitMfa() {
         $("mfa-btn").disabled = true;
         mfaAt = performance.now(); // graded clock: MFA submit -> documents
         show("Verifying...");
-        const { ok, data } = await post("/mfa", { sessionId, code: $("code").value.trim() });
-        if (!ok) {
+        const r = await submitTo("/mfa", { sessionId, code: $("code").value.trim() });
+        if (r.kind === "error") {
           $("mfa-btn").disabled = false;
-          return show("Error: " + (data.error || "bad code"));
+          return show("Error: " + r.error);
         }
-        finish(data.documents, data.gradedMs);
+        finish(r);
       }
 
-      function finish(documents, gradedMs) {
-        render(documents);
-        const full = (performance.now() - submitAt) / 1000; // login click -> on screen
-        if (mfaAt) {
-          // MFA path: this IS the brief's metric (MFA submit -> document on screen),
-          // timed client-side end to end.
-          const graded = (performance.now() - mfaAt) / 1000;
-          show(`done. MFA submit -> on screen ${graded.toFixed(1)}s | full login-click -> screen ${full.toFixed(1)}s`);
+      function finish(r) {
+        // streamed: PDFs already painted as they arrived. done (reuse): render now.
+        if (r.kind === "done") render(r.documents);
+        const start = mfaAt || submitAt;
+        const label = mfaAt ? "MFA submit" : "login";
+        const full = (performance.now() - submitAt) / 1000;
+        if (r.kind === "streamed" && r.firstAt) {
+          // streaming win: the first PDF (the brief's "document on screen") lands before
+          // the slowest one finishes. Show time to first, and time to all.
+          const first = (r.firstAt - start) / 1000;
+          const all = (performance.now() - start) / 1000;
+          show(`done. first PDF on screen ${first.toFixed(1)}s | all ${all.toFixed(1)}s | full login-click ${full.toFixed(1)}s`);
         } else {
-          // No MFA on this account, so there is no MFA-submit instant to time from.
-          // Show the server-measured document-fetch span (the graded equivalent) and
-          // the full client login-click -> on screen for honesty.
-          const g = typeof gradedMs === "number" ? `${(gradedMs / 1000).toFixed(1)}s` : "n/a";
-          show(`done. documents fetched ${g} (graded span) | full login-click -> on screen ${full.toFixed(1)}s`);
+          // JSON done (reuse) or no firstAt: show the server-measured fetch span.
+          const g = typeof r.gradedMs === "number" ? `${(r.gradedMs / 1000).toFixed(1)}s` : "n/a";
+          show(`done. ${label} -> documents ${g} (graded span) | full login-click -> on screen ${full.toFixed(1)}s`);
         }
         mfaAt = 0; // reset for the next run
         $("login-btn").disabled = false; // allow another run without a page reload
       }
 
-      function render(documents) {
+      // reset the document area for a fresh render, releasing old blob URLs
+      function clearDocs() {
+        blobUrls.forEach((u) => URL.revokeObjectURL(u));
+        blobUrls = [];
         const out = $("docs-section");
         out.hidden = false;
         out.removeAttribute("inert");
-        // release the previous render's blob URLs before creating new ones
-        blobUrls.forEach((u) => URL.revokeObjectURL(u));
-        blobUrls = [];
-        out.innerHTML = documents
-          .map((d) => {
-            const bytes = Uint8Array.from(atob(d.bytes), (c) => c.charCodeAt(0));
-            const url = URL.createObjectURL(new Blob([bytes], { type: d.contentType }));
-            blobUrls.push(url);
-            const kb = Math.round(bytes.length / 1024);
-            // d.name may already carry an extension; don't double it to ".pdf.pdf"
-            const fname = d.name.toLowerCase().endsWith(".pdf") ? d.name : `${d.name}.pdf`;
-            return `<p>${d.name} (${d.contentType}, ${kb} KB) <a href="${url}" download="${fname}">download</a></p>
-              <iframe src="${url}" width="100%" height="480"></iframe>`;
-          })
-          .join("");
+        out.innerHTML = "";
+      }
+
+      // append one document's preview + download link
+      function renderOne(d) {
+        const bytes = Uint8Array.from(atob(d.bytes), (c) => c.charCodeAt(0));
+        const url = URL.createObjectURL(new Blob([bytes], { type: d.contentType }));
+        blobUrls.push(url);
+        const kb = Math.round(bytes.length / 1024);
+        const fname = d.name.toLowerCase().endsWith(".pdf") ? d.name : `${d.name}.pdf`;
+        const div = document.createElement("div");
+        div.innerHTML = `<p>${d.name} (${d.contentType}, ${kb} KB) <a href="${url}" download="${fname}">download</a></p>
+          <iframe src="${url}" width="100%" height="480"></iframe>`;
+        $("docs-section").appendChild(div);
+      }
+
+      function render(documents) {
+        clearDocs();
+        documents.forEach(renderOne);
       }
 
       $("login-btn").addEventListener("click", login);

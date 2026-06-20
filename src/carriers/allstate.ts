@@ -95,7 +95,7 @@ export class AllstateCarrier implements Carrier {
         }
     }
 
-    async fetchDocuments(): Promise<Document[]> {
+    async fetchDocuments(onDoc?: (doc: Document) => void): Promise<Document[]> {
         const session = requireSession(this.session);
         const page = session.page;
         // Fetch documents straight from Allstate's JSON API via page.request. NB:
@@ -163,7 +163,9 @@ export class AllstateCarrier implements Carrier {
                         yearFilter: Number(d.docYear) || year,
                     })) as { documentData?: { data?: string; mimeType?: string } };
                     const dd = j.documentData;
-                    return { name: d.title, contentType: dd?.mimeType || "application/pdf", bytes: dd?.data ?? "" } satisfies Document;
+                    const doc = { name: d.title, contentType: dd?.mimeType || "application/pdf", bytes: dd?.data ?? "" } satisfies Document;
+                    onDoc?.(doc); // stream this PDF the moment its bytes land
+                    return doc;
                 });
             }),
         );
