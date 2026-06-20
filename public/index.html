@@ -85,7 +85,8 @@
 
       const show = (msg) => ($("status").textContent = msg);
       let sessionId = null;
-      let submitAt = 0;
+      let submitAt = 0; // login-button click
+      let mfaAt = 0; // MFA-submit click (the graded "MFA -> docs" start)
       let blobUrls = []; // object URLs from the last render, revoked on the next
 
       async function post(path, body) {
@@ -137,6 +138,7 @@
 
       async function submitMfa() {
         $("mfa-btn").disabled = true;
+        mfaAt = performance.now(); // graded clock: MFA submit -> documents
         show("Verifying...");
         const { ok, data } = await post("/mfa", { sessionId, code: $("code").value.trim() });
         if (!ok) {
@@ -147,10 +149,19 @@
       }
 
       function finish(documents) {
-        const toResponse = (performance.now() - submitAt) / 1000;
+        // Graded span: MFA-submit -> docs when MFA was used (excludes pre-warm +
+        // your code-typing time); else login -> docs. Also show full login-click time.
+        const start = mfaAt || submitAt;
+        const label = mfaAt ? "MFA submit" : "login";
+        const toScreenGraded = (performance.now() - start) / 1000;
         render(documents);
-        const toScreen = (performance.now() - submitAt) / 1000;
-        show(`done. submit -> response: ${toResponse.toFixed(1)}s | submit -> on screen: ${toScreen.toFixed(1)}s`);
+        const onScreen = (performance.now() - start) / 1000;
+        const full = (performance.now() - submitAt) / 1000;
+        show(
+          `done. ${label} -> response ${toScreenGraded.toFixed(1)}s | ${label} -> on screen ${onScreen.toFixed(1)}s` +
+            (mfaAt ? ` (full login-click -> screen: ${full.toFixed(1)}s)` : ""),
+        );
+        mfaAt = 0; // reset for the next run
         $("login-btn").disabled = false; // allow another run without a page reload
       }
 
