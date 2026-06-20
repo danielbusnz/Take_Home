@@ -38,6 +38,7 @@
     <script type="module">
       const $ = (id) => document.getElementById(id);
       let warmId = null;
+      let preparing = null; // in-flight /prepare; login() awaits it so it never cold-starts
 
       // Fill the carrier dropdown from the backend registry (its single source).
       async function loadCarriers() {
@@ -46,28 +47,38 @@
           $("carrier").innerHTML = carriers
             .map((c) => `<option value="${c}">${c}</option>`)
             .join("");
+          prepare(); // warm the default-selected carrier immediately on load
         } catch {
           $("status").textContent = "Could not load carriers. Is the server running?";
         }
       }
 
-      // Speculative pre-warm: when the user picks a carrier, start opening the
-      // browser + login page in the background so login is faster on submit.
-      async function prepare() {
+      // Speculative pre-warm: open the browser + login page in the background so
+      // login is fast on submit. Kicked off on page load AND on carrier change.
+      // prepare() is slow (~11s: Allstate's SPA hydrates), so we keep the in-flight
+      // promise in `preparing` and have login() await it — otherwise a user who
+      // submits before prepare returns sends warmId:null and /login cold-starts a
+      // SECOND full prepare (~22s). Awaiting guarantees the warm session is reused.
+      function prepare() {
         warmId = null;
         const carrier = $("carrier").value;
-        if (!carrier) return;
-        try {
-          const res = await fetch("/prepare", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ carrier }),
-          });
-          const data = await res.json();
-          if (res.ok) warmId = data.warmId;
-        } catch {
-          /* pre-warm is best-effort; login still works without it */
+        if (!carrier) {
+          preparing = null;
+          return;
         }
+        preparing = (async () => {
+          try {
+            const res = await fetch("/prepare", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ carrier }),
+            });
+            const data = await res.json();
+            if (res.ok) warmId = data.warmId;
+          } catch {
+            /* pre-warm is best-effort; login still works (just slower) without it */
+          }
+        })();
       }
 
       $("carrier").addEventListener("change", prepare);
@@ -95,6 +106,13 @@
       async function login() {
         $("login-btn").disabled = true;
         submitAt = performance.now();
+        // wait for any in-flight pre-warm so /login reuses the warm session instead
+        // of cold-starting a second prepare. If you submit before prepare finished,
+        // you wait the remainder here (still far better than a double prepare).
+        if (preparing) {
+          show("Preparing session...");
+          await preparing;
+        }
         show("Logging in...");
         const { ok, data } = await post("/login", {
           carrier: $("carrier").value,
