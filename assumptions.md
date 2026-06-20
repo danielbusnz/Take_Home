@@ -53,3 +53,11 @@ Assumed, not tested (likely to vary per user):
 How the real carrier copes: detect state, do not assume. Race the login outcomes
 (dashboard / MFA / error / captcha) and read the MFA options offered rather than
 hardcoding SMS. Map anything unknown to a typed `CarrierError` so it fails cleanly.
+
+## Session reuse
+
+The kept-alive session assumes the carrier's authenticated session (and Akamai `_abck`)
+stays valid for the reuse TTL (8 min). If it expires sooner, the reuse refetch fails and
+`/login` falls back to a fresh login, so a stale session degrades to slower, not broken.
+The reuse key is a one-way hash that includes the password, so a wrong password cannot
+reach another user's cached session.

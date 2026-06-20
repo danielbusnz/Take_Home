@@ -69,14 +69,14 @@ Session store: in-memory `Map` keyed by sessionId. Good enough for a take-home, 
 
 Write carrier one fully, then carrier two, THEN extract what's shared. Don't abstract at n=1.
 
-## Open / TODO
+## Status: shipped
 
-- [x] Browserbase: login + MFA + dashboard proven end to end (Allstate, residential proxy)
-- [x] Backend: /login, /mfa, /carriers, session Map, typed errors (vs mock)
-- [ ] AllstateCarrier: real login / MFA / fetchDocuments behind the Carrier interface
-- [ ] Second carrier
-- [ ] Frontend: build to frontend.md (dropdown done; login / MFA / docs next)
-- [ ] Session reuse via Browserbase Contexts
-- [ ] Latency instrumentation (~8s budget)
-- [ ] Deploy the long-running backend off the machine (Railway/Render/Fly, not serverless)
-- [ ] README + Loom + Claude session links
+- [x] Browserbase: login + MFA + dashboard end to end (Allstate, residential proxy)
+- [x] Backend: /login, /mfa, /carriers, /prepare, session Map, typed errors
+- [x] AllstateCarrier: real login / MFA / full-API fetchDocuments behind the Carrier interface
+- [x] Second carrier (Assurant)
+- [x] Frontend: dropdown, pre-warm on load, login / MFA / doc render, graded-span display
+- [x] Session reuse: kept-alive validated session keyed by a credential hash (not BB Contexts)
+- [x] Latency instrumentation: per-step timings + graded span; ~6-8s graded, ~3s on reuse
+- [x] Deployed off the machine: Fly (iad), long-running, not serverless
+- [x] README done (Loom + Claude session links are the final deliverables)

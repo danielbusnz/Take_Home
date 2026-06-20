@@ -12,7 +12,7 @@ One section visible at a time. `ERROR` returns to the previous state so the user
 | LOGGING_IN | same form | disabled, status "Logging in... (6s)" |
 | MFA_NEEDED | code input, "Code sent to ***9605" | enabled |
 | MFA_SUBMITTING | code input | disabled, status "Verifying..." |
-| DONE | document list + Refresh + Forget | n/a |
+| DONE | document list (PDF preview + download) + timing line | re-enabled for another run |
 | ERROR | back to prior state | re-enabled |
 
 Transitions: `IDLE -> LOGGING_IN -> (MFA_NEEDED | DONE)`, `MFA_NEEDED -> MFA_SUBMITTING -> DONE`.
@@ -20,7 +20,12 @@ Transitions: `IDLE -> LOGGING_IN -> (MFA_NEEDED | DONE)`, `MFA_NEEDED -> MFA_SUB
 ## Decisions
 
 1. **Auto-pick SMS.** UI just says "Code sent to ***9605". No delivery-method picker.
-2. **Download links, no inline preview.** `data:` PDFs in an iframe are blocked in Chrome 112+. Use `<a download>`. Show name, content type, and size per doc.
+2. **Inline preview via blob URLs.** `data:` PDFs in an iframe are blocked in Chrome 112+, but blob URLs are not, so each doc renders in an `<iframe>` plus a download link. Show name, content type, and size per doc.
+
+## Pre-warm and timing
+
+- **Pre-warm on page load.** `/prepare` fires the instant the page loads (not on submit), so the ~10s browser open overlaps the user typing. The status line shows "Preparing a secure session..." then "Ready."
+- **Timing on screen.** On finish the status line shows the graded fetch span (`documents fetched X.Xs`, the brief's metric) next to the full login-click number.
 
 ## Loading
 
@@ -42,10 +47,10 @@ On a bad MFA code, clear and focus the code field.
 
 ## Reuse
 
-On the results screen:
-
-- **Refresh documents**: re-runs `/login` with the saved creds, reuses the session, back in ~2s. The live demo moment.
-- **Forget saved session**: clears state back to IDLE.
+Reuse is automatic on the backend: a repeat login with the same credentials refetches on the
+kept-alive validated session and returns in ~3s (keyed by a one-way credential hash, see
+`sessions.ts`). The login button re-enables after a run, so submitting the same credentials
+again is the live demo moment. No separate refresh/forget buttons.
 
 ## Accessibility (all cheap)
 

@@ -52,3 +52,22 @@ timeout. So a single hang has nothing to stop it.
 A hung `connectOverCDP` returns a `504` within the deadline, the Browserbase session
 is closed, and the session is removed from the Map. Worst-case `fetchDocuments` cannot
 exceed the deadline.
+
+## #3 Cold-login reliability is bounded by the carrier's anti-bot, and failures are slow
+
+Severity: medium. Observed live.
+
+A single cold login against a live anti-bot portal is not 100% reliable by nature. Under
+heavy test velocity (many logins per hour from the same residential pool), Allstate began
+slow-walking the login: after submitting credentials the page stayed on
+`/anon/account/login` instead of advancing. This is environmental (the carrier's defenses
+reacting to volume), not a code bug, and it cools off on its own.
+
+Two real gaps it exposes:
+- **No clean fast failure.** With no per-operation deadline (see #2), a slow-walked login
+  took ~30-60s to surface as a 500 instead of a fast 504. Fix #2 bounds this.
+- **No backoff.** Retrying a blocked login immediately makes the block worse and risks an
+  account lockout. A real deployment would back off and surface "try again shortly".
+
+Session reuse mitigates the common case: once one login succeeds, repeat runs skip the
+login entirely, so the fragile step runs once per session window rather than every time.

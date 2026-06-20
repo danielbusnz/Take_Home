@@ -5,6 +5,30 @@ Graded metric: "MFA submission to document on screen" = `submitMfa` + `fetchDocu
 Measure on prod (Fly `iad`, co-located with the Browserbase `us-east-1` session); local runs
 slower for CDP-heavy steps but identical for browser->carrier work.
 
+## Final shipped state (measured on prod, Allstate, trusted device)
+
+Two clocks, kept honest:
+
+- **Graded span** (the brief's metric, MFA submission to document on screen; on a trusted
+  device it is the `fetchDocuments` span): **~6 to 8s.** Logged as `GRADED login->docs` /
+  `GRADED mfa-submit->docs`.
+- **Repeat run** (same credentials, session reuse): **~3s.** Logged as `GRADED reuse->docs`.
+- **Full login-click to documents on screen** (real UI, Playwright-driven): **~10 to 13s**,
+  because it includes the ~4s credential login that cannot be pre-warmed.
+
+Two changes got it here:
+
+- **Pre-warm on page load.** The frontend fires `/prepare` the instant the page loads, so the
+  ~10s login-page open overlaps the user typing instead of sitting in the post-submit path. A
+  cold submit (no pre-warm) measured ~23s; pre-warmed is ~10-13s.
+- **Session reuse.** After a successful run the validated browser is kept alive, keyed by a
+  one-way hash of the credentials. A repeat login refetches on that live session and skips
+  prepare + login. The refetch is fast even though it re-runs the primer, because the kept-alive
+  session keeps Allstate's server session warm.
+
+The UI shows the graded span on screen (`documents fetched X.Xs`) next to the full login-click
+number, so the demo reports the brief's clock, not the inflated one.
+
 ## Where it stands
 
 - **Assurant: ~7.8s graded.** Meets the target. Single download (Confirmation of Coverage),
