@@ -8,7 +8,7 @@ Live: https://take-home-policy-puller.fly.dev/
 ## Carriers
 
 - **Allstate** (custom login + SMS MFA, documents from the portal's JSON API)
-- **Assurant** (Okta login + SMS MFA)
+- **Geico** renters (Okta login + SMS MFA, serviced via Assurant's portal)
 
 Both implement one `Carrier` interface, so a third is one file.
 

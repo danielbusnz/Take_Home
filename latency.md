@@ -38,7 +38,7 @@ The latency-vs-detection tradeoff, decided per carrier:
   Akamai gates `/api/secured` on the validated session cookie, not per-request IP, so
   this rides a legitimate session and is fast. The byte-fetch egresses our datacenter
   IP on a validated session, a documented residual.
-- **Assurant** stays in-page (`fetch` inside the browser) because Cloudflare re-scores
+- **Geico** (serviced via Assurant's portal) stays in-page (`fetch` inside the browser) because Cloudflare re-scores
   every request, so it keeps the residential IP and real Chrome TLS.
 
 Residual tells, acceptable for a demo, would harden for production: a minimal request

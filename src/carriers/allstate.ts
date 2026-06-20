@@ -104,7 +104,7 @@ export class AllstateCarrier implements Carrier {
         // /api/secured on the SESSION (the validated `_abck` cookie, which the
         // residential+Verified login earns and page.request carries) + CSRF, not
         // per-request IP, so the fast path rides a legitimate session. In-page fetch
-        // (residential) is ~2x slower; see latency.md. Assurant stays in-page
+        // (residential) is ~2x slower; see latency.md. Geico stays in-page
         // (Cloudflare re-scores per request). Fallback: `allstate-ui-fallback`.
         installNetSniff(page); // no-op unless ALLSTATE_DEBUG; doc phase only, never sees the password
         const api = page.request;

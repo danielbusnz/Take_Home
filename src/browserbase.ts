@@ -27,7 +27,7 @@ export class BrowserbaseSession {
 
     // Open a session, connect over CDP, and enable downloads to BB cloud storage.
     // Per-carrier config: Allstate passes { verified, geo } (Verified fingerprint
-    // validates Akamai's _abck + a region-pinned IP for Okta); Assurant opts out
+    // validates Akamai's _abck + a region-pinned IP for Okta); Geico opts out
     // (Cloudflare doesn't need Verified, and the extra weight slows its multi-step
     // UI nav — its original ~7.8s used a plain residential proxy).
     static async open(opts: { verified?: boolean; geo?: { country: string; state: string } } = {}): Promise<BrowserbaseSession> {

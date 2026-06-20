@@ -47,7 +47,7 @@ test("GET /carriers lists the real carriers, not the mock", async () => {
     const body = (await res.json()) as { carriers: string[] };
     assert.equal(res.status, 200);
     assert.ok(body.carriers.includes("allstate"));
-    assert.ok(body.carriers.includes("assurant"));
+    assert.ok(body.carriers.includes("geico"));
     assert.ok(!body.carriers.includes("mock")); // mock backs the tests, not the UI
 });
 
