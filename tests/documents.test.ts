@@ -23,3 +23,7 @@ test("validateDocuments returns docs unchanged", () => {
   const docs = [pdf];
   assert.deepEqual(validateDocuments("mock", docs), docs);
 });
+
+test("validateDocuments throws when there are no documents", () => {
+  assert.throws(() => validateDocuments("mock", []), /no documents/);
+});

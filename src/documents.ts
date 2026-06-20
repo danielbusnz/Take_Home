@@ -1,4 +1,5 @@
 import type { Document } from "./types.js";
+import { DocumentsUnavailableError } from "./errors.js";
 
 export const EXPECTED_CONTENT_TYPE = "application/pdf";
 
@@ -16,12 +17,13 @@ export function inspectDocument(doc: Document): DocumentWarning | null {
     return null;
 }
 
-// Logs suspicious docs, returns them unchanged, so scrape problems show in logs.
-// Empty result is ambiguous (scrape failed vs no docs); real check is upstream
-// in fetchDocuments. See assumptions.md row 9.
+// Throws if the scrape produced nothing: these carriers always have >=1 document,
+// so an empty result means the fetch broke, not that the user has none. A silent
+// empty "success" is the worst failure for a tool whose job is pulling documents.
+// Otherwise logs suspicious-but-present docs and returns them.
 export function validateDocuments(carrier: string, docs: Document[]): Document[] {
     if (docs.length === 0) {
-        console.warn(`[${carrier}] fetchDocuments returned 0 documents`);
+        throw new DocumentsUnavailableError(`${carrier}: no documents were retrieved`);
     }
     for (const doc of docs) {
         const warning = inspectDocument(doc);
