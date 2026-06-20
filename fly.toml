@@ -9,6 +9,7 @@ primary_region = "iad"
 
 [env]
   PORT = "3000"
+  ALLSTATE_DEBUG = "1"   # TEMPORARY: per-call timing + redacted net logs (strip before final submit)
 
 [http_service]
   internal_port = 3000

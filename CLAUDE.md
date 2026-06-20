@@ -47,8 +47,8 @@ Graded latency = "MFA submission -> document on screen" (`submitMfa` + `fetchDoc
 prod (co-located). Allstate often skips MFA, so its graded span is mostly `fetchDocuments`.
 
 Next:
-- **Verify `page.request` source-IP on prod** (Fly datacenter IP). Full-API works from a residential
-  IP locally; confirm Allstate accepts the datacenter IP, else fall back to `allstate-ui-fallback`.
+- **Source IP: resolved.** Carrier doc APIs now run in-page (`fetchInPage`) so they egress from the
+  residential proxy + Chrome TLS, not our datacenter IP. Verified via our own echo server.
 - **Redeploy `main` to prod** (prod is several commits behind `main`, now full-API Allstate).
 - Deferred resilience: no request/operation timeout (`known-issues.md` #2).
 - README full version + Loom (remaining deliverables).
@@ -110,7 +110,10 @@ Use these specialized agents for the work they fit. Prefer them over writing bli
 - Anti-bot is priority #1: keep the residential proxy on; avoid `evaluate`-based fills
   (isTrusted:false -> Akamai flag) and aggressive parallelism.
 - Allstate's internal document JSON API works in-browser and is the big latency lever (~12s -> ~5.3s);
-  it is the path on `main`. Full details + gotchas (CSRF must be `decodeURIComponent(XSRF-TOKEN)`,
-  the `GetDocumentsForPolicies` context primer, JSON-string body) in `latency.md`. It is NOT
-  anti-bot-gated (Akamai `_abck=-1` but `/api/secured` returns 200). The UI-nav fallback lives on
-  branch `allstate-ui-fallback`.
+  it is the path on `main`. Run it via `session.fetchInPage` (in-page `fetch`), NOT `page.request`,
+  so it rides the residential IP + Chrome TLS. Full details + gotchas (CSRF must be
+  `decodeURIComponent(XSRF-TOKEN)`, the `GetDocumentsForPolicies` context primer, JSON-string body)
+  in `latency.md`. Anti-bot = Akamai Bot Manager (`/cwnbKR/` + `/akam/` sensor) + F5. With Browserbase
+  Verified + the residential proxy, Akamai VALIDATES the session (`_abck` status=0, sensor POSTs 201) —
+  confirmed by `scripts/allstate-fp-attack-probe.ts`. If `_abck` ever shows `-1` again, the full-API
+  path is at risk; fall back to the UI-nav branch `allstate-ui-fallback`.

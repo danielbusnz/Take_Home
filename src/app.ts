@@ -22,6 +22,21 @@ app.use(express.static("public")); // serve the static frontend
 // list the carriers the frontend can offer (single source: the registry)
 app.get("/carriers", (_req, res) => res.json({ carriers: Object.keys(carriers) }));
 
+// TEMPORARY profiling surface (gated by DEBUG_ECHO): reflects what it received —
+// source IP and headers — so we can profile our outbound request fingerprint
+// against our own server instead of hammering the carriers. Remove before submit.
+if (process.env.DEBUG_ECHO) {
+    app.all("/debug/echo", (req, res) => {
+        res.json({
+            method: req.method,
+            forwardedFor: req.headers["x-forwarded-for"],
+            flyClientIp: req.headers["fly-client-ip"],
+            userAgent: req.headers["user-agent"],
+            headers: req.headers,
+        });
+    });
+}
+
 // Speculative pre-warm: open the browser and load the login form ahead of time
 // (while the user types), so /login can skip ~11s of session + page load.
 app.post("/prepare", async (req, res) => {

@@ -30,7 +30,19 @@ export class BrowserbaseSession {
         const tCreate = Date.now();
         const session = await bb().sessions.create({
             projectId: process.env.BROWSERBASE_PROJECT_ID!,
-            proxies: true, // residential egress, beats datacenter-IP anti-bot
+            // Verified (Scale plan): purpose-built Chromium with REAL fingerprints
+            // recognized as legitimate by Browserbase's bot-protection partners
+            // (Akamai/Cloudflare). Fixes the cloud tells (e.g. hardwareConcurrency)
+            // coherently — a real fingerprint, not a JS-masked one. Do NOT customize
+            // the viewport/UA here: Verified ignores viewport and the profiles are
+            // crafted as coherent wholes, so overriding only risks a mismatch. To
+            // change the profile, use `os` (e.g. "windows"|"mac"), not overrides.
+            browserSettings: { verified: true },
+            // residential egress, beats datacenter-IP anti-bot. Pin geolocation to
+            // the user's region (MA) so the egress IP is geo-consistent run to run,
+            // which lowers Okta "new location"/impossible-travel risk; Browserbase
+            // keeps one IP per session (sticky), so it won't rotate mid-flow.
+            proxies: [{ type: "browserbase", geolocation: { country: "US", state: "MA" } }],
             region: "us-east-1", // co-locate near our compute; CDP RTT dominates per-action cost
             timeout: 1800, // seconds: covers the human MFA pause
         });
@@ -39,6 +51,12 @@ export class BrowserbaseSession {
         const browser = await chromium.connectOverCDP(session.connectUrl);
         const context = browser.contexts()[0];
         const page = context.pages()[0]; // Browserbase hands us the page
+        // NOTE: we deliberately do NOT JS-override navigator.hardwareConcurrency /
+        // deviceMemory. On a Verified browser (real, unspoofed fingerprint) a
+        // defineProperty getter is itself detectable (own-property accessor + a
+        // getter whose toString isn't [native code]), and nothing in the measured
+        // attack surface reads these values. The viewport is set at the Browserbase
+        // layer (browserSettings.viewport), which is below JS and not a tell.
         // required so Browserbase syncs downloaded files to its cloud storage
         const cdp = await context.newCDPSession(page);
         await cdp.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: "downloads", eventsEnabled: true });
@@ -71,6 +89,34 @@ export class BrowserbaseSession {
         return Buffer.from(await r.arrayBuffer()).toString("base64");
     }
 
+    // Fetch a URL from INSIDE the page, so the request rides the browser's
+    // residential-proxy IP, real Chrome TLS fingerprint, and cookies, instead of
+    // going out as a Node client from our datacenter IP (which anti-bot systems
+    // flag). Use this for carriers' internal-API document calls. Returns the body
+    // as base64 (works for JSON and binary alike). The page function is passed as
+    // a string with args inlined so tsx/esbuild can't inject its `__name` helper
+    // (undefined in the page context) into the evaluated function.
+    async fetchInPage(
+        url: string,
+        opts: { method?: string; headers?: Record<string, string>; body?: string } = {},
+    ): Promise<{ status: number; contentType: string; base64: string }> {
+        const init = {
+            method: opts.method ?? "GET",
+            headers: opts.headers ?? {},
+            body: opts.body, // JSON.stringify drops this key when undefined (GET)
+            credentials: "include",
+        };
+        const expr = `(async () => {
+            const r = await fetch(${JSON.stringify(url)}, ${JSON.stringify(init)});
+            const bytes = new Uint8Array(await r.arrayBuffer());
+            let binary = "";
+            for (let i = 0; i < bytes.length; i += 0x8000)
+                binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+            return { status: r.status, contentType: r.headers.get("content-type") || "", base64: btoa(binary) };
+        })()`;
+        return this.page.evaluate(expr) as Promise<{ status: number; contentType: string; base64: string }>;
+    }
+
     // Given items a carrier already triggered (each a display name + the filename
     // the download produced), wait for the files to sync, pair them by filename,
     // and fetch every doc's bytes concurrently. Carriers differ in how they
@@ -100,6 +146,14 @@ export class BrowserbaseSession {
     async close(): Promise<void> {
         await this.browser.close();
     }
+}
+
+// Random delay in [0, maxMs). Used to de-synchronize parallel document fetches:
+// firing N identical authenticated requests in the same millisecond is an unhuman
+// cadence anti-bot systems score on, so we stagger each start by a random amount.
+// Still parallel, so the batch is gated by the slowest fetch plus at most maxMs.
+export function jitter(maxMs: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, Math.random() * maxMs));
 }
 
 // Carriers hold an optional session (set by prepare/login). This narrows it to a

@@ -1,7 +1,7 @@
 import type { Carrier, Document } from "../types.js";
-import { InvalidCredentialsError, InvalidMfaError, DocumentsUnavailableError } from "../errors.js";
+import { CarrierError, InvalidCredentialsError, InvalidMfaError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
-import { BrowserbaseSession, step, requireSession } from "../browserbase.js";
+import { BrowserbaseSession, step, requireSession, jitter } from "../browserbase.js";
 
 const LOGIN_URL = process.env.ASSURANT_LOGIN_URL ?? "https://manage.myassurantpolicy.com/app/login";
 const STEP_TIMEOUT = 30_000;
@@ -9,17 +9,38 @@ const STEP_TIMEOUT = 30_000;
 // Real Assurant (renters) portal automation. Auth is an embedded Okta widget:
 // inputs #okta-signin-username / #okta-signin-password, submit #okta-signin-submit.
 // MFA is an Okta SMS code into input[name=answer]. After login the account lands
-// on /app/policy/selection; documents live on the server-rendered /Policy/Documents.
-// Shared Browserbase plumbing (session + downloads) lives in BrowserbaseSession.
+// on /app/policy/selection. Documents are then pulled from Assurant's JSON/PDF API
+// (in-browser via page.request), not the UI. See latency.md / assurant-probe.
 export class AssurantCarrier implements Carrier {
     readonly name = "assurant";
     private session?: BrowserbaseSession;
+    // The Assurant document API authenticates with an Okta Bearer JWT (plus app
+    // headers like the ui-transaction identity blob) that the Angular HTTP
+    // interceptor attaches, not just the session cookie. We capture the FULL
+    // header set from the app's own same-origin /api calls and replay all of it on
+    // our in-page document fetches, so our requests match the app's exactly.
+    private authHeaders: Record<string, string> = {};
 
     // Open the browser and load the Okta login form. No credentials needed, so
     // this can run ahead of login() to pre-warm while the user is still typing.
     async prepare(): Promise<void> {
         this.session = await BrowserbaseSession.open();
         const page = this.session.page;
+        // Capture the interceptor's full header set from the app's same-origin /api
+        // calls (fired during snapshot load). Strip headers the browser re-adds on
+        // our fetch, and content-type (our doc calls are GETs). Latest wins so the
+        // Bearer stays fresh.
+        page.on("request", (req) => {
+            if (!/myassurantpolicy\.com\/api\//i.test(req.url())) return;
+            const h = req.headers();
+            if (!h["authorization"]?.startsWith("Bearer")) return;
+            const captured: Record<string, string> = {};
+            for (const [k, v] of Object.entries(h)) {
+                if (/^(host|connection|content-length|content-type|accept-encoding|user-agent|cookie|origin|referer|sec-|:)/i.test(k)) continue;
+                captured[k] = v;
+            }
+            this.authHeaders = captured;
+        });
         const tGoto = Date.now();
         await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
         console.log(`[timing] goto: ${Date.now() - tGoto}ms`);
@@ -83,47 +104,66 @@ export class AssurantCarrier implements Carrier {
     async fetchDocuments(): Promise<Document[]> {
         const session = requireSession(this.session);
         const page = session.page;
+        const origin = new URL(LOGIN_URL).origin;
+        const LOB = "RI"; // renters line of business (policyDetails.LOB)
         const tNav = Date.now();
-        // we land on the policy-selection list; open the policy to set it active
-        // server-side (the snapshot is what /Policy/Documents resolves against).
+
+        // Activate the policy server-side and read its number for the API calls.
+        // The selection list shows REN-format numbers; clicking one sets it active
+        // (the session context the document endpoints resolve against) and lands on
+        // the snapshot. This is the only non-API step; everything below is JSON/PDF.
+        let policyNumber = "";
         if (/selection/i.test(page.url())) {
-            await page.getByText(/REN\d+/i).first().click();
+            const renEl = page.getByText(/REN\d+/i).first();
+            await renEl.waitFor({ timeout: STEP_TIMEOUT });
+            policyNumber = (await renEl.innerText()).match(/REN\d+/i)?.[0] ?? "";
+            await renEl.click();
             await page.waitForURL(/snapshot/, { timeout: STEP_TIMEOUT }).catch(() => {});
         }
-        // reach documents the way the UI does: the snapshot's "view policy
-        // documents" card. (A direct goto can land back on selection.)
-        await step(page, "assurant nav-docs", async () => {
-            await page.getByText(/view policy documents|need proof of insurance/i).first().click();
-            await page.waitForURL(/\/Policy\/Documents/i, { timeout: STEP_TIMEOUT });
-        });
-        await page.getByRole("heading", { name: /policy documents/i }).waitFor({ timeout: STEP_TIMEOUT });
-        console.log(`[timing] nav-docs: ${Date.now() - tNav}ms`);
+        if (!policyNumber) policyNumber = (await page.locator("body").innerText()).match(/REN\d+/i)?.[0] ?? "";
+        if (!policyNumber) throw new CarrierError("assurant: could not determine policy number");
 
-        // Every "Download" control on the page: the Confirmation of Coverage card
-        // (always available) plus the Current Documents table rows once the policy
-        // finishes processing. Each click downloads a PDF into Browserbase storage.
-        const tClicks = Date.now();
-        const triggers = page
-            .getByRole("button", { name: /download/i })
-            .or(page.getByRole("link", { name: /download/i }));
-        const count = await triggers.count();
-        if (count === 0)
-            throw new DocumentsUnavailableError("no documents available yet (policy may still be processing)");
+        // The selection click above triggers the app's authed API calls; wait
+        // briefly for the Bearer token to be captured before we call the API.
+        for (let i = 0; i < 25 && !this.authHeaders["authorization"]; i++) await page.waitForTimeout(200);
+        const headers: Record<string, string> = { ...this.authHeaders }; // full captured app header set
+        if (!headers["authorization"]) throw new CarrierError("assurant: could not capture API auth token");
 
-        const filePromises: Promise<string>[] = [];
-        for (let i = 0; i < count; i++) {
-            const waitDownload = page.waitForEvent("download", { timeout: STEP_TIMEOUT });
-            await triggers.nth(i).click();
-            filePromises[i] = waitDownload.then((d) => d.suggestedFilename()).catch(() => "");
-        }
-        const files = await Promise.all(filePromises);
-        console.log(`[timing] trigger-downloads: ${Date.now() - tClicks}ms`);
+        // List the policy's stored documents (declarations page, etc.). Fetched
+        // from inside the page (session.fetchInPage) so it rides the residential IP
+        // + Chrome TLS, not our Node client. See latency.md / fingerprint findings.
+        const listRes = await session.fetchInPage(`${origin}/api/Policies/${policyNumber}/Documents?lob=${LOB}`, { headers });
+        if (listRes.status >= 400) throw new CarrierError(`assurant: document list failed (${listRes.status})`);
+        const list =
+            (JSON.parse(Buffer.from(listRes.base64, "base64").toString("utf8")) as {
+                Documents?: { DocId: string; DocumentType?: string; DocumentTitle?: string; MimeType?: string }[];
+            }).Documents ?? [];
+        console.log(`[timing] api-list: ${Date.now() - tNav}ms (${list.length} docs)`);
 
-        // name each doc by its (opaque) filename, then collect the bytes
-        const items = files
-            .filter(Boolean)
-            .map((filename) => ({ name: filename.replace(/\.pdf$/i, ""), filename }));
-        const docs = await session.collectDocuments(items);
+        // Fetch every PDF in parallel straight from the API (in-page). The per-doc
+        // token is just encodeURIComponent(DocId) (see documents-list.component.js
+        // line 179); the always-available Confirmation of Coverage has its own URL.
+        const tDocs = Date.now();
+        const fetchPdf = async (url: string, name: string, fallbackType = "application/pdf"): Promise<Document> => {
+            await jitter(700); // stagger starts so the doc fetches aren't a single-ms burst
+            const r = await session.fetchInPage(url, { headers });
+            if (r.status >= 400) throw new CarrierError(`assurant: document fetch failed (${r.status}) for "${name}"`);
+            return { name, contentType: r.contentType || fallbackType, bytes: r.base64 };
+        };
+        const docs = await Promise.all([
+            ...list.map((d) =>
+                fetchPdf(
+                    `${origin}/api/Policies/${policyNumber}/Document?documentToken=${encodeURIComponent(d.DocId)}&lob=${LOB}`,
+                    d.DocumentType?.replace(/^\d+\s*/, "").trim() || d.DocumentTitle || "Policy document",
+                    d.MimeType || "application/pdf",
+                ),
+            ),
+            fetchPdf(
+                `${origin}/api/v2/Policies/${policyNumber}/POI/ConfirmationOfCoverage?outputMode=file`,
+                "Confirmation of Coverage",
+            ),
+        ]);
+        console.log(`[timing] api-docs: ${Date.now() - tDocs}ms`);
         return validateDocuments(this.name, docs);
     }
 

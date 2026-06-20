@@ -40,9 +40,15 @@ slower for CDP-heavy steps but identical for browser->carrier work.
   click sped up; the rest re-serialize on the page settling after each popup. No net win.
 
 ## The big win (now on `main`): full-API document fetch
-Fetch documents straight from Allstate's JSON API in-browser via `page.request`, skipping the
-UI nav, popups, and Browserbase download storage entirely. **Doc stage ~5.3s.** The UI-navigation
-version is kept on branch `allstate-ui-fallback` as a fallback (most human-like footprint, ~12s).
+Fetch documents straight from Allstate's JSON API from INSIDE the page (`session.fetchInPage`,
+which runs `fetch()` via `page.evaluate`), skipping the UI nav, popups, and Browserbase download
+storage entirely. **Doc stage ~5.3s.** The UI-navigation version is kept on branch
+`allstate-ui-fallback` as a fallback (most human-like footprint, ~12s).
+
+Why in-page `fetch` and not `page.request`: `page.request` is a Node HTTP client, so it egresses
+from our process (a Fly datacenter IP) with a Node/undici TLS fingerprint that does not match the
+Chrome UA it sends. An in-page `fetch` rides the browser's residential-proxy IP, real Chrome TLS,
+and cookies, so the API call looks like the app's own XHR. See the fingerprint notes below.
 
 Endpoints (host `myaccountrwd.allstate.com`), all authenticated by the session cookies:
 1. `GET /api/secured/GetUserData` -> `policies[0].policyImage.number` (policy number).
@@ -59,25 +65,49 @@ Two gotchas that cost hours:
   cookie value 500s ("Unsuccessful service call"); the decoded value matches what Angular sends.
 - **POST body** must be a JSON string (`JSON.stringify(...)`), not a Playwright `data` object,
   or the server receives a null body.
-- Required headers: `app-name: MYA`, `x-efm: true`, `content-type: application/json`, plus the
-  decoded `x-xsrf-token`. The `x-sid/x-vid/x-iid/x-tid` headers are telemetry only (they go to
-  analytics hosts, not the API) and are NOT needed.
+- Load-bearing headers we send: `app-name: MYA`, `x-efm: true`, `content-type: application/json`,
+  plus the decoded `x-xsrf-token`. NOTE: the real app's HTTP interceptor also attaches correlation
+  IDs (`x-sid/x-vid/x-iid/x-tid`) to these calls; we omit them because the API still answers without
+  them, but that means our request header set is a minimal, distinctive subset of the app's, which is
+  itself a fingerprint difference. Replaying the full captured header set would be more faithful.
 
-Important findings from the probe:
-- **It is NOT anti-bot.** Akamai's `_abck` cookie stays `~-1~` (unvalidated) the whole time, yet
-  the authenticated `/api/secured` calls return 200. The failures were app-level 500s from a bad
-  CSRF token, not a bot wall.
-- **Caveat to verify:** `page.request` for a CDP (Browserbase) browser likely executes from our
-  Node process, not through the residential proxy, so the API calls go out from our server IP
-  carrying the session cookies. Allstate accepts this (the endpoints check session + CSRF, not IP).
-  Confirm on prod before relying on it.
+Anti-bot characterization:
+- **Allstate = Akamai Bot Manager (the `/cwnbKR/<obf>` + `/akam/13/pixel_*` sensor) + F5 BIG-IP.**
+  The sensor JS collects a device + behavioral fingerprint and POSTs encrypted `sensor_data` (we saw
+  4 POSTs, ~1.9-4KB, as it gathered signal). F5 `BIGipServer*` cookies are load-balancer affinity,
+  not bot detection; `conacc.allstate.com` (IBM Security Access Manager) is the auth backend.
+- **Akamai VALIDATES us under the hardened config (`_abck` status=0).** Measured with a fingerprint
+  probe (`scripts/allstate-fp-attack-probe.ts`): with Browserbase **Verified** (a real Windows/Chrome
+  fingerprint Akamai's partners recognize) + the MA residential proxy + real trusted Playwright input,
+  the sensor POSTs return **201** with `x-akamai-transformed: 0 - 0 -` and `_abck` validates to
+  `status=0` on first load and stays validated. So the full-API session rides a *validated* Akamai
+  session — we pass the sensor, we don't merely ride unenforced endpoints.
+- **History:** before the Verified hardening (a vanilla Linux session), `_abck` stayed `~-1~`
+  (unvalidated). The fix was Verified + residential + trusted interaction, not a flag. If a future
+  session ever shows `_abck` status `-1` again, treat the full-API path as at risk and fall back to
+  the UI path. The earlier 500s were app-level (bad CSRF token), not a bot wall.
+- **Source IP: resolved.** Because the doc calls now run in-page (`fetchInPage`), they egress from
+  the residential proxy IP, not our datacenter IP. (Verified against our own echo server: an in-page
+  `fetch` shows the residential IP in `x-forwarded-for`; `page.request` shows our process IP.) Do
+  NOT reintroduce a `page.request` path for the carrier APIs — it puts the datacenter IP + Node TLS
+  back on the wire.
 
 ## Decision (done)
-Allstate uses the **full-API** path on `main` (~5.3s). The `GetUserData` + primer parallelization
-is applied (~1.5s saved). Alternatives kept for reference:
-- **UI-only** (branch `allstate-ui-fallback`): ~12s, most human-like footprint, no source-IP question.
-- **hybrid**: keep the human UI nav, then API-fetch only the PDFs; ~7-8s. Not implemented.
+Allstate uses the **full-API** path on `main` (~5.3s), with the doc calls made in-page
+(`fetchInPage`, residential IP + Chrome TLS) and the `GetUserData` + primer parallelization (~1.5s).
+Alternatives kept for reference:
+- **UI-only** (branch `allstate-ui-fallback`): ~12s, most human-like footprint.
+- **hybrid**: human UI nav to the documents page (validates the session + makes request ordering /
+  referer / sec-fetch match a real user), then in-page API fetch of the PDFs; ~7-8s. Not implemented.
 
-Still open: verify the `page.request` **source IP** on prod (Fly datacenter IP, not the residential
-proxy). The API calls worked from a residential IP locally; confirm Allstate accepts the datacenter
-IP before relying on full-API in production. If it ever gets IP-walled, fall back to `allstate-ui-fallback`.
+Known residual bot tells (see the pentest notes; acceptable for a demo, would harden for production):
+- Parallel burst: all `GetUdpRetrieveDocument` calls fire at once via `Promise.all` (now with a small
+  random `jitter`), still an unhuman cadence vs a real user clicking docs. The hybrid + serialized
+  fetches would fix it, at a few seconds' latency cost.
+- Minimal/curated header set vs the app's full set (above).
+- Fingerprint: we run Browserbase **Verified** (real Windows/Chrome profile) and do NOT JS-override
+  navigator values — Verified's coherent fingerprint is what validates `_abck` (see above), so masking
+  on top would only reintroduce a tell.
+RESOLVED (was the main latent risk): `_abck` now validates (status=0) under the hardened config.
+If the full-API path ever gets walled, fall back to the **UI** path (`allstate-ui-fallback`), never
+to a `page.request` datacenter-IP client.

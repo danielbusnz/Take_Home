@@ -1,7 +1,8 @@
 import type { Carrier, Document } from "../types.js";
 import { CarrierError, InvalidMfaError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
-import { BrowserbaseSession, step, requireSession } from "../browserbase.js";
+import { BrowserbaseSession, step, requireSession, jitter } from "../browserbase.js";
+import { DEBUG, dlog, timed, installNetSniff } from "../debug.js";
 
 const LOGIN_URL =
     process.env.ALLSTATE_LOGIN_URL ?? "https://myaccountrwd.allstate.com/anon/account/login";
@@ -91,7 +92,7 @@ export class AllstateCarrier implements Carrier {
         // Fetch documents straight from Allstate's JSON API, in-browser via
         // page.request (shares the session cookies + fingerprint), skipping the UI
         // nav, popups, and Browserbase download storage entirely. See latency.md.
-        const api = page.request;
+        installNetSniff(page); // no-op unless ALLSTATE_DEBUG; doc phase only, never sees the password
         const origin = new URL(LOGIN_URL).origin;
         const tNav = Date.now();
         const xsrfCookie = (await page.context().cookies()).find((c) => c.name === "XSRF-TOKEN")?.value ?? "";
@@ -105,6 +106,18 @@ export class AllstateCarrier implements Carrier {
             "content-type": "application/json",
             referer: `${origin}/secured/documents/policy-documents`,
         };
+        // All calls run INSIDE the page (session.fetchInPage) so they ride the
+        // browser's residential IP + Chrome TLS, not our Node client from a
+        // datacenter IP. The responses are JSON; decode the base64 body.
+        const getJson = async (url: string) =>
+            JSON.parse(Buffer.from((await session.fetchInPage(url, { headers })).base64, "base64").toString("utf8"));
+        const postJson = async (url: string, body: object) =>
+            JSON.parse(
+                Buffer.from(
+                    (await session.fetchInPage(url, { method: "POST", headers, body: JSON.stringify(body) })).base64,
+                    "base64",
+                ).toString("utf8"),
+            );
 
         const year = new Date().getFullYear();
         // GetUserData (→ policy number) and the document-context primer don't depend
@@ -112,32 +125,40 @@ export class AllstateCarrier implements Carrier {
         // primer's body is empty but it scopes the session to the policy's docs;
         // without it the list below comes back empty. The list call needs both done.
         const [ud] = (await Promise.all([
-            api.get(`${origin}/api/secured/GetUserData`, { headers }).then((r) => r.json()),
-            api.get(`${origin}/api/secured/document/GetDocumentsForPolicies`, { headers }),
+            timed("GetUserData", () => getJson(`${origin}/api/secured/GetUserData`)),
+            timed("GetDocumentsForPolicies(primer)", async () => {
+                const r = await session.fetchInPage(`${origin}/api/secured/document/GetDocumentsForPolicies`, { headers });
+                if (DEBUG) dlog("primer body:", Buffer.from(r.base64, "base64").toString("utf8").slice(0, 600));
+                return r;
+            }),
         ])) as [{ policies?: { policyImage?: { number?: string } }[] }, unknown];
         const policyNumber = ud.policies?.[0]?.policyImage?.number;
         if (!policyNumber) throw new CarrierError("allstate: could not determine policy number");
 
-        const listResp = await api.post(`${origin}/api/secured/document/GetPolicySpecificDocsList`, {
-            headers,
-            data: JSON.stringify({ policyNumber, contentId: null, yearFilter: year }),
+        const list = await timed("GetPolicySpecificDocsList", async () => {
+            const j = (await postJson(`${origin}/api/secured/document/GetPolicySpecificDocsList`, {
+                policyNumber,
+                contentId: null,
+                yearFilter: year,
+            })) as { policySpecificDocumentsList?: { title: string; contentId: string; docYear: string }[] };
+            return j.policySpecificDocumentsList ?? [];
         });
-        const list =
-            ((await listResp.json()) as {
-                policySpecificDocumentsList?: { title: string; contentId: string; docYear: string }[];
-            }).policySpecificDocumentsList ?? [];
         console.log(`[timing] api-list: ${Date.now() - tNav}ms (${list.length} docs)`);
 
         // fetch every document's bytes in parallel straight from the JSON API
         const tDocs = Date.now();
         const docs = await Promise.all(
-            list.map(async (d) => {
-                const r = await api.post(`${origin}/api/secured/document/GetUdpRetrieveDocument`, {
-                    headers,
-                    data: JSON.stringify({ policyNumber, contentId: d.contentId, yearFilter: Number(d.docYear) || year }),
+            list.map(async (d, i) => {
+                await jitter(700); // stagger starts so the doc fetches aren't a single-ms burst
+                return timed(`GetUdpRetrieveDocument[${i}] ${d.title.slice(0, 24)}`, async () => {
+                    const j = (await postJson(`${origin}/api/secured/document/GetUdpRetrieveDocument`, {
+                        policyNumber,
+                        contentId: d.contentId,
+                        yearFilter: Number(d.docYear) || year,
+                    })) as { documentData?: { data?: string; mimeType?: string } };
+                    const dd = j.documentData;
+                    return { name: d.title, contentType: dd?.mimeType || "application/pdf", bytes: dd?.data ?? "" } satisfies Document;
                 });
-                const dd = ((await r.json()) as { documentData?: { data?: string; mimeType?: string } }).documentData;
-                return { name: d.title, contentType: dd?.mimeType || "application/pdf", bytes: dd?.data ?? "" } satisfies Document;
             }),
         );
         console.log(`[timing] api-docs: ${Date.now() - tDocs}ms`);
