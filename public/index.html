@@ -75,14 +75,21 @@
       const show = (msg) => ($("status").textContent = msg);
       let sessionId = null;
       let submitAt = 0;
+      let blobUrls = []; // object URLs from the last render, revoked on the next
 
       async function post(path, body) {
-        const res = await fetch(path, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        return { ok: res.ok, data: await res.json() };
+        try {
+          const res = await fetch(path, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          return { ok: res.ok, data: await res.json() };
+        } catch {
+          // network failure or a non-JSON response: report via the !ok path
+          // instead of throwing out of the handler and wedging the button.
+          return { ok: false, data: { error: "could not reach the server" } };
+        }
       }
 
       async function login() {
@@ -126,18 +133,25 @@
         render(documents);
         const toScreen = (performance.now() - submitAt) / 1000;
         show(`done. submit -> response: ${toResponse.toFixed(1)}s | submit -> on screen: ${toScreen.toFixed(1)}s`);
+        $("login-btn").disabled = false; // allow another run without a page reload
       }
 
       function render(documents) {
         const out = $("docs-section");
         out.hidden = false;
         out.removeAttribute("inert");
+        // release the previous render's blob URLs before creating new ones
+        blobUrls.forEach((u) => URL.revokeObjectURL(u));
+        blobUrls = [];
         out.innerHTML = documents
           .map((d) => {
             const bytes = Uint8Array.from(atob(d.bytes), (c) => c.charCodeAt(0));
             const url = URL.createObjectURL(new Blob([bytes], { type: d.contentType }));
+            blobUrls.push(url);
             const kb = Math.round(bytes.length / 1024);
-            return `<p>${d.name} (${d.contentType}, ${kb} KB) <a href="${url}" download="${d.name}.pdf">download</a></p>
+            // d.name may already carry an extension; don't double it to ".pdf.pdf"
+            const fname = d.name.toLowerCase().endsWith(".pdf") ? d.name : `${d.name}.pdf`;
+            return `<p>${d.name} (${d.contentType}, ${kb} KB) <a href="${url}" download="${fname}">download</a></p>
               <iframe src="${url}" width="100%" height="480"></iframe>`;
           })
           .join("");
