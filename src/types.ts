@@ -8,13 +8,15 @@ export type Document = {
     bytes: string; // base64
 };
 
-// what /login returns
+// what /login returns. gradedMs is the server-measured graded span (the document
+// fetch, i.e. the MFA-submit->docs equivalent), so the UI can show the real graded
+// number rather than the full login-click->screen wall time.
 export type LoginResponse =
     | { status: "mfa_needed"; sessionId: string }
-    | { status: "done"; sessionId: string; documents: Document[] };
+    | { status: "done"; sessionId: string; documents: Document[]; gradedMs: number };
 
-// what /mfa returns
-export type MfaResponse = { status: "done"; documents: Document[] };
+// what /mfa returns. gradedMs = machine time from MFA submit to documents.
+export type MfaResponse = { status: "done"; documents: Document[]; gradedMs: number };
 
 // what any endpoint returns on failure, with a non-2xx status. Failures are
 // status codes + this body, not a "failed" field on the success types.

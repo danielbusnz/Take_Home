@@ -40,19 +40,17 @@
       let warmId = null;
       let preparing = null; // in-flight /prepare; login() awaits it so it never cold-starts
 
-      // Fill the carrier dropdown from the backend registry (its single source),
-      // then default to the first REAL carrier and pre-warm it the instant the
-      // page loads, so the cloud browser is already opening before the user types.
-      // The mock's prepare() is a no-op, so defaulting to it (registry order) would
-      // warm nothing and a fast submit would cold-start (~23s; see latency.md).
+      // Fill the carrier dropdown from the backend, then pre-warm the default
+      // carrier the instant the page loads, so the cloud browser is already opening
+      // before the user types (a fast submit into a cold session is ~23s; see
+      // latency.md).
       async function loadCarriers() {
         try {
           const { carriers } = await (await fetch("/carriers")).json();
           $("carrier").innerHTML = carriers
             .map((c) => `<option value="${c}">${c}</option>`)
             .join("");
-          $("carrier").value = carriers.find((c) => c !== "mock") ?? carriers[0];
-          prepare(); // fire the pre-warm on load for the default real carrier
+          prepare(); // fire the pre-warm on load for the default carrier
         } catch {
           $("status").textContent = "Could not load carriers. Is the server running?";
         }
@@ -144,7 +142,7 @@
           $("code").focus();
           return show("Enter the code we sent you");
         }
-        finish(data.documents);
+        finish(data.documents, data.gradedMs);
       }
 
       async function submitMfa() {
@@ -156,22 +154,24 @@
           $("mfa-btn").disabled = false;
           return show("Error: " + (data.error || "bad code"));
         }
-        finish(data.documents);
+        finish(data.documents, data.gradedMs);
       }
 
-      function finish(documents) {
-        // Graded span: MFA-submit -> docs when MFA was used (excludes pre-warm +
-        // your code-typing time); else login -> docs. Also show full login-click time.
-        const start = mfaAt || submitAt;
-        const label = mfaAt ? "MFA submit" : "login";
-        const toScreenGraded = (performance.now() - start) / 1000;
+      function finish(documents, gradedMs) {
         render(documents);
-        const onScreen = (performance.now() - start) / 1000;
-        const full = (performance.now() - submitAt) / 1000;
-        show(
-          `done. ${label} -> response ${toScreenGraded.toFixed(1)}s | ${label} -> on screen ${onScreen.toFixed(1)}s` +
-            (mfaAt ? ` (full login-click -> screen: ${full.toFixed(1)}s)` : ""),
-        );
+        const full = (performance.now() - submitAt) / 1000; // login click -> on screen
+        if (mfaAt) {
+          // MFA path: this IS the brief's metric (MFA submit -> document on screen),
+          // timed client-side end to end.
+          const graded = (performance.now() - mfaAt) / 1000;
+          show(`done. MFA submit -> on screen ${graded.toFixed(1)}s | full login-click -> screen ${full.toFixed(1)}s`);
+        } else {
+          // No MFA on this account, so there is no MFA-submit instant to time from.
+          // Show the server-measured document-fetch span (the graded equivalent) and
+          // the full client login-click -> on screen for honesty.
+          const g = typeof gradedMs === "number" ? `${(gradedMs / 1000).toFixed(1)}s` : "n/a";
+          show(`done. documents fetched ${g} (graded span) | full login-click -> on screen ${full.toFixed(1)}s`);
+        }
         mfaAt = 0; // reset for the next run
         $("login-btn").disabled = false; // allow another run without a page reload
       }

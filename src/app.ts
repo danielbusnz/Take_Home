@@ -8,6 +8,11 @@ import {
     BusyError,
     withLock,
     fetchAndFinish,
+    fetchAndKeep,
+    refetchOnWarm,
+    dropWarm,
+    reuseCache,
+    credKey,
     cleanup,
 } from "./sessions.js";
 import { requireStrings, sendError } from "./http.js";
@@ -19,23 +24,11 @@ export const app = express();
 app.use(express.json());
 app.use(express.static("public")); // serve the static frontend
 
-// list the carriers the frontend can offer (single source: the registry)
-app.get("/carriers", (_req, res) => res.json({ carriers: Object.keys(carriers) }));
-
-// TEMPORARY profiling surface (gated by DEBUG_ECHO): reflects what it received —
-// source IP and headers — so we can profile our outbound request fingerprint
-// against our own server instead of hammering the carriers. Remove before submit.
-if (process.env.DEBUG_ECHO) {
-    app.all("/debug/echo", (req, res) => {
-        res.json({
-            method: req.method,
-            forwardedFor: req.headers["x-forwarded-for"],
-            flyClientIp: req.headers["fly-client-ip"],
-            userAgent: req.headers["user-agent"],
-            headers: req.headers,
-        });
-    });
-}
+// list the carriers the frontend can offer. The mock backs the test suite and is
+// not a real portal, so it is not offered in the UI.
+app.get("/carriers", (_req, res) =>
+    res.json({ carriers: Object.keys(carriers).filter((c) => c !== "mock") }),
+);
 
 // Speculative pre-warm: open the browser and load the login form ahead of time
 // (while the user types), so /login can skip ~11s of session + page load.
@@ -68,6 +61,32 @@ app.post("/login", async (req, res) => {
     const make = carriers[carrierName];
     if (!make) return res.status(400).json({ error: "unknown carrier" });
 
+    // Authenticated-session reuse: a repeat login with the SAME credentials
+    // refetches on the still-alive validated session, skipping prepare + login
+    // (the brief rewards running more than once). credHash includes the password,
+    // so a wrong password misses the cache and cannot reach another user's session.
+    const credHash = credKey(carrierName, username, password);
+    const reuseId = reuseCache.get(credHash);
+    if (reuseId) {
+        const warm = sessions.get(reuseId);
+        if (warm && warm.keepUntil && Date.now() < warm.keepUntil && !warm.inFlight) {
+            try {
+                const tGraded = Date.now();
+                const documents = await withLock(warm, () => refetchOnWarm(warm));
+                const gradedMs = Date.now() - tGraded;
+                console.log(`[timing] GRADED reuse->docs: ${gradedMs}ms`);
+                return res.json({ status: "done", sessionId: reuseId, documents, gradedMs } satisfies LoginResponse);
+            } catch (e) {
+                if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
+                await dropWarm(credHash); // kept-alive session dead/expired/deauthed: log in fresh
+            }
+        } else if (warm?.inFlight) {
+            return res.status(409).json({ error: "session is busy, retry shortly" });
+        } else {
+            await dropWarm(credHash); // stale pointer
+        }
+    }
+
     // reuse a ready pre-warmed session if the client supplied one; else go fresh
     const warmId = typeof req.body.warmId === "string" ? req.body.warmId : undefined;
     const warm = warmId ? sessions.get(warmId) : undefined;
@@ -96,6 +115,7 @@ app.post("/login", async (req, res) => {
         session = { state: "LOGGING_IN", carrier: make(), lastActivity: Date.now() };
         sessions.set(sessionId, session);
     }
+    session.credHash = credHash; // so a later /mfa caches under the same reuse key
 
     try {
         // hold the lock for the whole login so a double-submit is rejected (409)
@@ -106,11 +126,12 @@ app.post("/login", async (req, res) => {
                 session.state = "AWAITING_MFA";
                 return { status: "mfa_needed", sessionId } satisfies LoginResponse;
             }
-            // trusted device, no MFA: go straight to documents
+            // trusted device, no MFA: go straight to documents, keep session for reuse
             const tGraded = Date.now();
-            const documents = await fetchAndFinish(sessionId, session);
-            console.log(`[timing] GRADED login->docs (no mfa): ${Date.now() - tGraded}ms`);
-            return { status: "done", sessionId, documents } satisfies LoginResponse;
+            const documents = await fetchAndKeep(sessionId, session, credHash);
+            const gradedMs = Date.now() - tGraded;
+            console.log(`[timing] GRADED login->docs (no mfa): ${gradedMs}ms`);
+            return { status: "done", sessionId, documents, gradedMs } satisfies LoginResponse;
         });
         return res.json(result);
     } catch (e) {
@@ -135,10 +156,14 @@ app.post("/mfa", async (req, res) => {
         const documents = await withLock(session, async () => {
             session.state = "SUBMITTING_MFA";
             await session.carrier.submitMfa(code);
-            return fetchAndFinish(sessionId, session);
+            // keep the authenticated session for reuse (credHash was set in /login)
+            return session.credHash
+                ? fetchAndKeep(sessionId, session, session.credHash)
+                : fetchAndFinish(sessionId, session);
         });
-        console.log(`[timing] GRADED mfa-submit->docs: ${Date.now() - tGraded}ms`);
-        return res.json({ status: "done", documents } satisfies MfaResponse);
+        const gradedMs = Date.now() - tGraded;
+        console.log(`[timing] GRADED mfa-submit->docs: ${gradedMs}ms`);
+        return res.json({ status: "done", documents, gradedMs } satisfies MfaResponse);
     } catch (e) {
         if (e instanceof BusyError) return res.status(409).json({ error: "session is busy, retry shortly" });
         // a wrong/expired code is recoverable: rewind to AWAITING_MFA and keep the

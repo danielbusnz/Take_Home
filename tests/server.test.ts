@@ -1,8 +1,9 @@
-import { test, before, after } from "node:test";
+import { test, before, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { app } from "../src/app.js";
+import { sessions, reuseCache } from "../src/sessions.js";
 
 // Endpoint integration tests driven by the mock carrier: no Browserbase, no live
 // portal, deterministic. Exercises the server wiring the real carriers can't test
@@ -24,6 +25,14 @@ before(async () => {
 
 after(() => server.close());
 
+// Isolate module state between tests: the sessions Map and the credential reuse
+// cache persist in-process, so without this a cached session from one test would
+// satisfy a later test's login.
+beforeEach(() => {
+    sessions.clear();
+    reuseCache.clear();
+});
+
 async function post(path: string, body: unknown) {
     const res = await fetch(base + path, {
         method: "POST",
@@ -33,13 +42,13 @@ async function post(path: string, body: unknown) {
     return { status: res.status, body: (await res.json()) as Record<string, any> };
 }
 
-test("GET /carriers lists the registered carriers", async () => {
+test("GET /carriers lists the real carriers, not the mock", async () => {
     const res = await fetch(base + "/carriers");
     const body = (await res.json()) as { carriers: string[] };
     assert.equal(res.status, 200);
-    assert.ok(body.carriers.includes("mock"));
     assert.ok(body.carriers.includes("allstate"));
     assert.ok(body.carriers.includes("assurant"));
+    assert.ok(!body.carriers.includes("mock")); // mock backs the tests, not the UI
 });
 
 test("POST /login rejects missing fields with 400", async () => {
@@ -143,6 +152,21 @@ test("pre-warm then login reuses the warm session", async () => {
     assert.equal(login.status, 200);
     assert.equal(login.body.status, "done");
     assert.equal(login.body.sessionId, warm.body.warmId); // same session, reused
+});
+
+test("repeat login with the same credentials reuses the authenticated session", async () => {
+    const first = await post("/login", { carrier: "mock", username: "nomfa", password: "secret" });
+    assert.equal(first.body.status, "done");
+    const second = await post("/login", { carrier: "mock", username: "nomfa", password: "secret" });
+    assert.equal(second.body.status, "done");
+    assert.equal(second.body.sessionId, first.body.sessionId); // same kept-alive session
+});
+
+test("a wrong password cannot reach the cached session (different key)", async () => {
+    const first = await post("/login", { carrier: "mock", username: "nomfa", password: "right" });
+    assert.equal(first.body.status, "done");
+    const second = await post("/login", { carrier: "mock", username: "nomfa", password: "wrong" });
+    assert.notEqual(second.body.sessionId, first.body.sessionId); // fresh session, no reuse
 });
 
 // --- errors that happen outside a route handler must still return JSON, no stack ---
