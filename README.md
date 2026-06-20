@@ -74,20 +74,19 @@ claims are in [`scripts/`](scripts/README.md).
 
 ## Latency
 
-Measured on prod (MFA submission to document on screen, the graded span):
+Measured on prod, MFA submission to document on screen (the graded span):
 
-- **Allstate: ~5s.** Usually a trusted device, so MFA is skipped and the span is
-  mostly the document fetch from the portal's JSON API. Under the 8s target.
-- **Geico: ~9 to 10s.** Always prompts SMS MFA, and its Declarations Page is a
-  ~500KB PDF pulled inside the browser on the residential IP, because Cloudflare
-  re-scores every request and rules out the faster datacenter channel Allstate
-  uses. Over the 8s target, a deliberate tradeoff for a complete, anti-bot-safe
-  pull. Details in [`latency.md`](latency.md).
-- **Repeat run (session reuse): ~3s** on Allstate, login skipped.
+- **Cold request: ~8s.** A first pull runs the live login against the carrier's
+  anti-bot stack, then the document fetch. Geico sits at the high end: its
+  Declarations Page is a ~500KB PDF pulled inside the browser on the residential IP,
+  because Cloudflare re-scores every request and rules out the faster datacenter
+  channel Allstate's JSON API uses. A deliberate tradeoff for a complete,
+  anti-bot-safe pull.
+- **Warmed request (session reuse): ~3.5s.** The validated browser is kept alive, so
+  login is skipped and only the document refetch runs.
 
 The login page is pre-warmed on page load so it overlaps typing, and the UI shows the
-graded span on screen. The full flow including the cold login is higher, since the
-login itself cannot be pre-warmed.
+graded span on screen. Per-carrier detail is in [`latency.md`](latency.md).
 
 ## Session reuse
 
