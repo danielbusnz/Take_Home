@@ -108,12 +108,11 @@ export class AssurantCarrier implements Carrier {
         // heading, so wait for one before scraping (else we find zero).
         const tFetch = Date.now();
         const origin = new URL(LOGIN_URL).origin;
-        await page
-            .locator("a[href*='documentToken']")
-            .or(page.getByRole("button", { name: /download/i }))
-            .first()
-            .waitFor({ timeout: STEP_TIMEOUT })
-            .catch(() => {});
+        // The POI "Download" button renders first; the Current Documents anchors lag
+        // it by up to ~1s. Wait for an ANCHOR specifically (resolves the instant one
+        // appears, ~1.6s) before scraping — waiting on the button would let us scrape
+        // before any anchor exists and find nothing.
+        await page.locator("a[href*='documentToken']").first().waitFor({ timeout: STEP_TIMEOUT }).catch(() => {});
 
         const targets: { url: string; name: string }[] = [];
         for (const a of await page.locator("a[href*='documentToken']").all()) {
