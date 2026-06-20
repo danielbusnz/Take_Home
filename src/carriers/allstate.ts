@@ -89,10 +89,16 @@ export class AllstateCarrier implements Carrier {
     async fetchDocuments(): Promise<Document[]> {
         const session = requireSession(this.session);
         const page = session.page;
-        // Fetch documents straight from Allstate's JSON API, in-browser via
-        // page.request (shares the session cookies + fingerprint), skipping the UI
-        // nav, popups, and Browserbase download storage entirely. See latency.md.
+        // Fetch documents straight from Allstate's JSON API via page.request. NB:
+        // page.request egresses from our process (datacenter IP / Node TLS), NOT
+        // the residential proxy. That's a deliberate latency tradeoff: Akamai gates
+        // /api/secured on the SESSION (the validated `_abck` cookie, which the
+        // residential+Verified login earns and page.request carries) + CSRF, not
+        // per-request IP, so the fast path rides a legitimate session. In-page fetch
+        // (residential) is ~2x slower; see latency.md. Assurant stays in-page
+        // (Cloudflare re-scores per request). Fallback: `allstate-ui-fallback`.
         installNetSniff(page); // no-op unless ALLSTATE_DEBUG; doc phase only, never sees the password
+        const api = page.request;
         const origin = new URL(LOGIN_URL).origin;
         const tNav = Date.now();
         const xsrfCookie = (await page.context().cookies()).find((c) => c.name === "XSRF-TOKEN")?.value ?? "";
@@ -106,18 +112,9 @@ export class AllstateCarrier implements Carrier {
             "content-type": "application/json",
             referer: `${origin}/secured/documents/policy-documents`,
         };
-        // All calls run INSIDE the page (session.fetchInPage) so they ride the
-        // browser's residential IP + Chrome TLS, not our Node client from a
-        // datacenter IP. The responses are JSON; decode the base64 body.
-        const getJson = async (url: string) =>
-            JSON.parse(Buffer.from((await session.fetchInPage(url, { headers })).base64, "base64").toString("utf8"));
+        const getJson = async (url: string) => (await api.get(url, { headers })).json();
         const postJson = async (url: string, body: object) =>
-            JSON.parse(
-                Buffer.from(
-                    (await session.fetchInPage(url, { method: "POST", headers, body: JSON.stringify(body) })).base64,
-                    "base64",
-                ).toString("utf8"),
-            );
+            (await api.post(url, { headers, data: JSON.stringify(body) })).json();
 
         const year = new Date().getFullYear();
         // GetUserData (→ policy number) and the document-context primer don't depend
@@ -127,8 +124,8 @@ export class AllstateCarrier implements Carrier {
         const [ud] = (await Promise.all([
             timed("GetUserData", () => getJson(`${origin}/api/secured/GetUserData`)),
             timed("GetDocumentsForPolicies(primer)", async () => {
-                const r = await session.fetchInPage(`${origin}/api/secured/document/GetDocumentsForPolicies`, { headers });
-                if (DEBUG) dlog("primer body:", Buffer.from(r.base64, "base64").toString("utf8").slice(0, 600));
+                const r = await api.get(`${origin}/api/secured/document/GetDocumentsForPolicies`, { headers });
+                if (DEBUG) dlog("primer body:", (await r.text()).slice(0, 600));
                 return r;
             }),
         ])) as [{ policies?: { policyImage?: { number?: string } }[] }, unknown];
