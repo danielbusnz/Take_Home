@@ -198,22 +198,16 @@
       }
 
       function finish(r) {
-        // streamed: PDFs already painted as they arrived. done (reuse): render now.
-        if (r.kind === "done") render(r.documents);
-        const start = mfaAt || submitAt;
-        const label = mfaAt ? "MFA submit" : "login";
-        const full = (performance.now() - submitAt) / 1000;
+        const start = mfaAt || submitAt; // MFA submit when present, else login click
+        let firstPdfMs;
         if (r.kind === "streamed" && r.firstAt) {
-          // streaming win: the first PDF (the brief's "document on screen") lands before
-          // the slowest one finishes. Show time to first, and time to all.
-          const first = (r.firstAt - start) / 1000;
-          const all = (performance.now() - start) / 1000;
-          show(`done. first PDF on screen ${first.toFixed(1)}s | all ${all.toFixed(1)}s | full login-click ${full.toFixed(1)}s`);
+          firstPdfMs = r.firstAt - start; // streamed: when the first PDF painted
         } else {
-          // JSON done (reuse) or no firstAt: show the server-measured fetch span.
-          const g = typeof r.gradedMs === "number" ? `${(r.gradedMs / 1000).toFixed(1)}s` : "n/a";
-          show(`done. ${label} -> documents ${g} (graded span) | full login-click -> on screen ${full.toFixed(1)}s`);
+          // JSON done (reuse): all docs arrive together, so render now and time it
+          render(r.documents);
+          firstPdfMs = performance.now() - start;
         }
+        show(`done: ${(firstPdfMs / 1000).toFixed(1)}s`); // time to first PDF on screen
         mfaAt = 0; // reset for the next run
         $("login-btn").disabled = false; // allow another run without a page reload
       }
