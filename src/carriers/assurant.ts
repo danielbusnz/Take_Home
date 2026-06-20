@@ -91,12 +91,14 @@ export class AssurantCarrier implements Carrier {
             await page.waitForURL(/snapshot/, { timeout: STEP_TIMEOUT }).catch(() => {});
         }
         // reach documents the way the UI does: the snapshot's "view policy
-        // documents" card. (A direct goto can land back on selection.)
+        // documents" card. (A direct goto can land back on selection.) Wait for the
+        // "Policy Documents" HEADING, not the URL — Assurant's SPA renders the docs
+        // view without the URL matching /Policy/Documents, so a URL wait times out
+        // even though the page loaded fine.
         await step(page, "assurant nav-docs", async () => {
             await page.getByText(/view policy documents|need proof of insurance/i).first().click();
-            await page.waitForURL(/\/Policy\/Documents/i, { timeout: STEP_TIMEOUT });
+            await page.getByRole("heading", { name: /policy documents/i }).waitFor({ timeout: STEP_TIMEOUT });
         });
-        await page.getByRole("heading", { name: /policy documents/i }).waitFor({ timeout: STEP_TIMEOUT });
         console.log(`[timing] nav-docs: ${Date.now() - tNav}ms`);
 
         // Every "Download" control on the page: the Confirmation of Coverage card
