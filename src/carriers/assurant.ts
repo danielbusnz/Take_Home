@@ -1,10 +1,69 @@
 import type { Carrier, Document } from "../types.js";
 import { InvalidCredentialsError, InvalidMfaError, DocumentsUnavailableError } from "../errors.js";
 import { validateDocuments } from "../documents.js";
-import { BrowserbaseSession, step, requireSession } from "../browserbase.js";
+import { BrowserbaseSession, step, requireSession, jitter } from "../browserbase.js";
 
 const LOGIN_URL = process.env.ASSURANT_LOGIN_URL ?? "https://manage.myassurantpolicy.com/app/login";
+// Derive the API origin from the login URL so the fast-path API calls track the
+// same host as the rest of the carrier (e.g. a staging ASSURANT_LOGIN_URL points
+// both the page nav AND the in-page API fetches at the same place). Falls back to
+// prod if the env value is somehow unparseable.
+const ORIGIN = (() => {
+    try {
+        return new URL(LOGIN_URL).origin;
+    } catch {
+        return "https://manage.myassurantpolicy.com";
+    }
+})();
 const STEP_TIMEOUT = 30_000;
+
+// Full REN is "REN" + 11 digits (e.g. REN66501720005). The short 7-digit form
+// (REN6650172) hits the POI endpoint but returns an HTML error page, not a PDF.
+// We require >= 10 digits after the prefix to distinguish the two forms.
+const FULL_REN_RE = /REN\d{10,}/i;
+
+// Try every reasonable extraction path against the raw /api/PolicyId response body.
+// Returns the full-form REN string, or null if none is found.
+function extractRen(raw: string): string | null {
+    // 1. Look for the literal "REN<digits>" pattern directly in the text (covers
+    //    both JSON string values and any plain-text response body).
+    const directMatch = raw.match(FULL_REN_RE);
+    if (directMatch) return directMatch[0].toUpperCase();
+
+    // 2. Try JSON parse: look in the most likely field names for a bare numeric id
+    //    that we can prefix. Carriers sometimes return the id without the "REN" prefix.
+    try {
+        const parsed: unknown = JSON.parse(raw);
+        if (parsed && typeof parsed === "object") {
+            const obj = parsed as Record<string, unknown>;
+            for (const key of ["PolicyId", "policyId", "policyNumber", "id", "Id", "renNumber"]) {
+                const val = obj[key];
+                if (typeof val === "string") {
+                    // Could be "REN66501720005" or "66501720005" (bare digits)
+                    const withPrefix = /^REN/i.test(val) ? val.toUpperCase() : `REN${val}`;
+                    if (FULL_REN_RE.test(withPrefix)) return withPrefix;
+                }
+                if (typeof val === "number") {
+                    const withPrefix = `REN${val}`;
+                    if (FULL_REN_RE.test(withPrefix)) return withPrefix;
+                }
+            }
+        }
+    } catch {
+        // not JSON — fall through to regex pass on raw text
+    }
+
+    // 3. Regex pass: find a bare-digit run of the accepted full-REN length anywhere
+    //    and prefix it. Matched length (>= 10) is aligned with FULL_REN_RE so any
+    //    bare run the validator would accept is also caught here.
+    const bareMatch = raw.match(/\b(\d{10,})\b/);
+    if (bareMatch) {
+        const candidate = `REN${bareMatch[1]}`;
+        if (FULL_REN_RE.test(candidate)) return candidate;
+    }
+
+    return null;
+}
 
 // Real Assurant (renters) portal automation. Auth is an embedded Okta widget:
 // inputs #okta-signin-username / #okta-signin-password, submit #okta-signin-submit.
@@ -83,6 +142,129 @@ export class AssurantCarrier implements Carrier {
     async fetchDocuments(): Promise<Document[]> {
         const session = requireSession(this.session);
         const page = session.page;
+
+        // ------------------------------------------------------------------ //
+        // FAST PATH: settle -> activate -> /api/PolicyId -> full REN -> POI    //
+        // All traffic stays in-page (residential proxy + Chrome TLS/cookies). //
+        // The fast path mirrors the real app's post-MFA flow so Cloudflare    //
+        // sees organic, settled, same-origin XHRs rather than cold early hits.//
+        // Any failure here falls through to the unchanged full download path. //
+        // ------------------------------------------------------------------ //
+
+        const tFastPath = Date.now();
+
+        // Step 0: let the post-MFA page settle before issuing any XHR. The real app
+        // fires /api/SetOktaUserIdAndToken (0ms) and /api/ResetBlitzPolicyView (247ms)
+        // before /api/PolicyId (~1802ms). Waiting for networkidle lets those
+        // session-state calls land first, so our PolicyId fetch matches the app's
+        // natural cadence instead of being a cold, out-of-order same-origin XHR.
+        await page
+            .waitForLoadState("networkidle", { timeout: STEP_TIMEOUT })
+            .catch(() => {}); // best effort: a busy SPA may never go fully idle
+
+        // Step 1: activate the policy. POI requires the policy to be "active"
+        // server-side, which the recon confirmed happens after the selection ->
+        // snapshot nav. We do the cheap activate click UNCONDITIONALLY when on
+        // /selection (not only when REN extraction fails): it makes the policy
+        // active AND it gives us a real snapshot navigation so the POI Referer we
+        // claim below matches the session's actual browsing history. This is far
+        // cheaper (~1s) than the full nav-docs path and keeps the request shape
+        // consistent for the per-request bot scorer.
+        if (/selection/i.test(page.url())) {
+            console.log(`[timing] fast-path-activate: clicking policy row to reach snapshot`);
+            try {
+                await page.getByText(/REN\d+/i).first().click();
+                await page.waitForURL(/snapshot/, { timeout: STEP_TIMEOUT }).catch(() => {});
+                // let the snapshot's own XHRs settle before we add ours
+                await page
+                    .waitForLoadState("networkidle", { timeout: STEP_TIMEOUT })
+                    .catch(() => {});
+            } catch (e) {
+                console.log(`[timing] fast-path-activate-error: ${(e as Error).message}`);
+            }
+        }
+
+        // Step 2: fetch /api/PolicyId from inside the browser to learn the full REN.
+        // Pass a referer of the page's actual current URL so this is not a
+        // referer-less XHR. Parse the body tolerantly (JSON fields or regex).
+        const tPolicyId = Date.now();
+        let ren: string | null = null;
+        try {
+            const policyIdRes = await session.fetchInPage(`${ORIGIN}/api/PolicyId`, {
+                headers: { referer: page.url() },
+            });
+            const rawBody = Buffer.from(policyIdRes.base64, "base64").toString("utf8");
+            console.log(`[timing] policyid: ${Date.now() - tPolicyId}ms (status=${policyIdRes.status})`);
+            if (policyIdRes.status < 400) ren = extractRen(rawBody);
+            if (!ren) console.log(`[timing] policyid-no-ren: could not extract full REN from response`);
+        } catch (e) {
+            console.log(`[timing] policyid-error: ${(e as Error).message}`);
+        }
+
+        // Step 2b: if no REN yet, retry /api/PolicyId once regardless of URL. The
+        // page may already be active (a single-policy account can auto-land on
+        // /snapshot, so the activate click above never ran), or session state may
+        // just have needed another beat to settle. A small jitter avoids a
+        // same-millisecond authenticated-XHR burst (see browserbase.ts jitter()).
+        if (!ren) {
+            await jitter(300);
+            const tRetry = Date.now();
+            try {
+                const retryRes = await session.fetchInPage(`${ORIGIN}/api/PolicyId`, {
+                    headers: { referer: page.url() },
+                });
+                const retryBody = Buffer.from(retryRes.base64, "base64").toString("utf8");
+                console.log(`[timing] policyid-retry: ${Date.now() - tRetry}ms (status=${retryRes.status})`);
+                if (retryRes.status < 400) ren = extractRen(retryBody);
+            } catch (e) {
+                console.log(`[timing] policyid-retry-error: ${(e as Error).message}`);
+            }
+        }
+
+        // Step 3: with the full REN, fetch the COC PDF directly via in-page fetch.
+        // The Referer is the page's ACTUAL current URL (not a hardcoded /snapshot),
+        // so the claimed referer matches the real navigation history the origin
+        // sees. A small jitter spaces this from the preceding PolicyId XHR so we
+        // don't fire a tight authenticated-XHR burst.
+        if (ren) {
+            await jitter(300);
+            const tPoi = Date.now();
+            try {
+                const poiUrl = `${ORIGIN}/api/v2/Policies/${ren}/POI/ConfirmationOfCoverage?outputMode=file`;
+                const poiRes = await session.fetchInPage(poiUrl, {
+                    headers: {
+                        accept: "application/pdf,*/*",
+                        referer: page.url(),
+                    },
+                });
+                console.log(`[timing] poi: ${Date.now() - tPoi}ms (status=${poiRes.status}, contentType="${poiRes.contentType}")`);
+
+                if (poiRes.status < 400 && /pdf|octet-stream/i.test(poiRes.contentType)) {
+                    console.log(`[timing] fast-path total: ${Date.now() - tFastPath}ms`);
+                    const doc: Document = {
+                        name: "ConfirmationOfCoverage",
+                        contentType: poiRes.contentType,
+                        bytes: poiRes.base64,
+                    };
+                    return validateDocuments(this.name, [doc]);
+                }
+
+                // POI returned something unexpected — fall through to full nav path.
+                console.log(`[timing] poi-not-pdf: falling back to download path`);
+            } catch (e) {
+                console.log(`[timing] poi-error: ${(e as Error).message} — falling back`);
+            }
+        }
+
+        console.log(`[timing] fast-path-miss: ${Date.now() - tFastPath}ms — falling back to download path`);
+
+        // ------------------------------------------------------------------ //
+        // FALLBACK: full nav -> trigger downloads -> collectDocuments          //
+        // Preserved exactly as the original carrier. Never removed.           //
+        // The fast path may have already navigated to /snapshot (the activate  //
+        // click above); the /selection guard below is a no-op in that case.   //
+        // ------------------------------------------------------------------ //
+
         const tNav = Date.now();
         // we land on the policy-selection list; open the policy to set it active
         // server-side (the snapshot is what /Policy/Documents resolves against).
