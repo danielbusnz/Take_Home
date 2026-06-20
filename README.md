@@ -12,13 +12,27 @@ Live: https://take-home-policy-puller.fly.dev/
 
 Both implement one `Carrier` interface, so a third is one file.
 
+## Prerequisites
+
+- Node.js 22 LTS or newer, and npm (https://nodejs.org). The npm scripts use Node's
+  built-in `--env-file` and `--watch`, so older majors will not run them.
+- git, to clone the repo.
+- A free Browserbase account for the cloud browser (https://www.browserbase.com). You
+  need its API key and Project ID.
+- To pull real documents you also need a working portal login (Allstate or Geico) to
+  type into the UI. Credentials are entered in the browser and never stored.
+
+No credentials are needed for `npm test`, so that is the fastest way to confirm the
+toolchain works.
+
 ## Run
 
 ```sh
-npm install        # .env needs BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID
-npm run dev        # http://localhost:3000
-npm test           # mock-driven endpoint tests, no Browserbase
-fly deploy         # one long-running machine in iad
+cp .env.example .env   # then fill in BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID
+npm install
+npm run dev            # http://localhost:3000
+npm test               # mock-driven endpoint tests, no Browserbase keys needed
+fly deploy             # one long-running machine in iad
 ```
 
 ## Run with Claude Code
@@ -55,7 +69,8 @@ fingerprint.
 Allstate runs Akamai plus F5. With the residential proxy, Verified, and real input,
 Akamai's `_abck` validates to status 0, so the session passes the sensor instead of
 riding unenforced endpoints. Documents then come from the portal's JSON API. The
-per-carrier tradeoff and the probe evidence are in [`latency.md`](latency.md).
+per-carrier tradeoff is in [`latency.md`](latency.md); the recon probes behind these
+claims are in [`scripts/`](scripts/README.md).
 
 ## Latency
 

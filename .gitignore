@@ -7,8 +7,13 @@ build/
 *.log
 .DS_Store
 
-# dev-only spikes and artifacts, never ship
-scripts/
+# dev-only spikes and artifacts, never ship, except the curated anti-bot probes
+scripts/*
+!scripts/README.md
+!scripts/antibot-probe.ts
+!scripts/fingerprint-probe.ts
+!scripts/allstate-fp-attack-probe.ts
+!scripts/assurant-fp-attack-probe.ts
 
 # local working notes, not shipped
 LOOM.md
