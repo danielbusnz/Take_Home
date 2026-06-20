@@ -101,45 +101,31 @@ export class AssurantCarrier implements Carrier {
         });
         console.log(`[timing] nav-docs: ${Date.now() - tNav}ms`);
 
-        // We're on the documents page now, so the doc URLs are authed by the session
-        // cookies (verified: an in-page fetch returns the PDF directly). Scrape the
-        // doc anchors and fetch them IN-PAGE, skipping the ~7s click -> Browserbase-
-        // storage -> poll -> fetch round-trip. The controls render ~100ms after the
-        // heading, so wait for one before scraping (else we find zero).
-        const tFetch = Date.now();
-        const origin = new URL(LOGIN_URL).origin;
-        // The POI "Download" button renders first; the Current Documents anchors lag
-        // it by up to ~1s. Wait for an ANCHOR specifically (resolves the instant one
-        // appears, ~1.6s) before scraping — waiting on the button would let us scrape
-        // before any anchor exists and find nothing.
-        await page.locator("a[href*='documentToken']").first().waitFor({ timeout: STEP_TIMEOUT }).catch(() => {});
-
-        const targets: { url: string; name: string }[] = [];
-        for (const a of await page.locator("a[href*='documentToken']").all()) {
-            const href = await a.getAttribute("href");
-            if (!href) continue;
-            const name = (await a.innerText().catch(() => "")).trim() || "Policy document";
-            targets.push({ url: new URL(href, origin).toString(), name });
-        }
-        // Confirmation of Coverage: build from the FULL policy number in a doc href
-        // (the selection-list shows a shorter form the POI endpoint rejects).
-        const fullRen = targets[0]?.url.match(/Policies\/(REN\d+)\//i)?.[1];
-        if (fullRen)
-            targets.push({ url: `${origin}/api/v2/Policies/${fullRen}/POI/ConfirmationOfCoverage?outputMode=file`, name: "Confirmation of Coverage" });
-        if (targets.length === 0)
+        // Every "Download" control on the page: the Confirmation of Coverage card
+        // (always available) plus the Current Documents table rows once the policy
+        // finishes processing. Each click downloads a PDF into Browserbase storage.
+        const tClicks = Date.now();
+        const triggers = page
+            .getByRole("button", { name: /download/i })
+            .or(page.getByRole("link", { name: /download/i }));
+        const count = await triggers.count();
+        if (count === 0)
             throw new DocumentsUnavailableError("no documents available yet (policy may still be processing)");
 
-        const fetched = await Promise.all(
-            targets.map(async (t) => {
-                const r = await session.fetchInPage(t.url, { headers: { accept: "application/pdf,*/*" } });
-                // skip anything not returned as a PDF (e.g. a transient error page),
-                // rather than failing the whole pull on one bad document.
-                if (r.status >= 400 || !/pdf|octet-stream/i.test(r.contentType)) return null;
-                return { name: t.name, contentType: r.contentType, bytes: r.base64 } satisfies Document;
-            }),
-        );
-        const docs = fetched.filter((d): d is Document => d !== null);
-        console.log(`[timing] api-docs (in-page): ${Date.now() - tFetch}ms`);
+        const filePromises: Promise<string>[] = [];
+        for (let i = 0; i < count; i++) {
+            const waitDownload = page.waitForEvent("download", { timeout: STEP_TIMEOUT });
+            await triggers.nth(i).click();
+            filePromises[i] = waitDownload.then((d) => d.suggestedFilename()).catch(() => "");
+        }
+        const files = await Promise.all(filePromises);
+        console.log(`[timing] trigger-downloads: ${Date.now() - tClicks}ms`);
+
+        // name each doc by its (opaque) filename, then collect the bytes
+        const items = files
+            .filter(Boolean)
+            .map((filename) => ({ name: filename.replace(/\.pdf$/i, ""), filename }));
+        const docs = await session.collectDocuments(items);
         return validateDocuments(this.name, docs);
     }
 
