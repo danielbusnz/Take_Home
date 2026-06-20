@@ -88,13 +88,23 @@ Anti-bot characterization:
   the UI path. The earlier 500s were app-level (bad CSRF token), not a bot wall.
 - **Source IP: resolved.** Because the doc calls now run in-page (`fetchInPage`), they egress from
   the residential proxy IP, not our datacenter IP. (Verified against our own echo server: an in-page
-  `fetch` shows the residential IP in `x-forwarded-for`; `page.request` shows our process IP.) Do
-  NOT reintroduce a `page.request` path for the carrier APIs — it puts the datacenter IP + Node TLS
-  back on the wire.
+  `fetch` shows the residential IP in `x-forwarded-for`; `page.request` shows our process IP.)
+  `page.request` puts the datacenter IP + Node TLS on the byte-fetch — acceptable for **Allstate**
+  (Akamai gates on the validated session cookie, not per-request IP; see Decision), NOT for
+  **Assurant** (Cloudflare re-scores every request), which stays in-page.
 
 ## Decision (done)
-Allstate uses the **full-API** path on `main` (~5.3s), with the doc calls made in-page
-(`fetchInPage`, residential IP + Chrome TLS) and the `GetUserData` + primer parallelization (~1.5s).
+**Latency vs anti-bot tradeoff, decided per carrier:**
+- **Allstate → `page.request` (datacenter, fast).** In-page `fetch` measured ~10.4s graded on prod
+  (residential proxy + `page.evaluate`/base64-over-CDP, esp. a 1.24MB PDF at ~3.2s). `page.request`
+  rides the **Akamai-validated session** (`_abck=0` earned by the residential+Verified login, carried
+  on the request cookies) + CSRF; Akamai gates `/api/secured` on the session, not per-request IP, so
+  the fast path stays legitimate. Targets ~5s (no-MFA) / ~6.7s (MFA), under the 8s requirement. The
+  documented residual: the byte-fetch egresses our datacenter IP on a validated session.
+- **Assurant → in-page `fetch` (residential).** Cloudflare re-scores per request, so datacenter
+  `page.request` is riskier there; Assurant's docs are small, so in-page is already fast enough.
+- `GetUserData` + primer run in parallel (~1.5s saved) on both.
+
 Alternatives kept for reference:
 - **UI-only** (branch `allstate-ui-fallback`): ~12s, most human-like footprint.
 - **hybrid**: human UI nav to the documents page (validates the session + makes request ordering /
