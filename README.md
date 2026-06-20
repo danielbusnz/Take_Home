@@ -21,6 +21,21 @@ npm test           # mock-driven endpoint tests, no Browserbase
 fly deploy         # one long-running machine in iad
 ```
 
+## Run with Claude Code
+
+Open Claude Code in an empty directory and paste:
+
+```
+Hi Claude.
+
+Clone https://github.com/danielbusnz/Take_Home.git into my current directory.
+
+Then read the README. I want to run Policy Puller locally. Help me set up
+everything: npm install, a .env with my BROWSERBASE_API_KEY and
+BROWSERBASE_PROJECT_ID, then npm run dev. Then walk me through pulling
+documents from Allstate or Geico with my own portal credentials.
+```
+
 ## How it works
 
 Long-running Express backend, because it holds the browser across the MFA pause
@@ -44,15 +59,20 @@ per-carrier tradeoff and the probe evidence are in [`latency.md`](latency.md).
 
 ## Latency
 
-Measured on prod. The brief grades MFA submission to document on screen, which on a
-trusted device is the document fetch:
+Measured on prod (MFA submission to document on screen, the graded span):
 
-- Graded fetch: **~6 to 8s**
-- Repeat run (session reuse): **~3s**
-- Full login-click to on screen: ~10 to 13s, including the ~4s login that cannot be pre-warmed
+- **Allstate: ~5s.** Usually a trusted device, so MFA is skipped and the span is
+  mostly the document fetch from the portal's JSON API. Under the 8s target.
+- **Geico: ~9 to 10s.** Always prompts SMS MFA, and its Declarations Page is a
+  ~500KB PDF pulled inside the browser on the residential IP, because Cloudflare
+  re-scores every request and rules out the faster datacenter channel Allstate
+  uses. Over the 8s target, a deliberate tradeoff for a complete, anti-bot-safe
+  pull. Details in [`latency.md`](latency.md).
+- **Repeat run (session reuse): ~3s** on Allstate, login skipped.
 
 The login page is pre-warmed on page load so it overlaps typing, and the UI shows the
-graded span on screen.
+graded span on screen. The full flow including the cold login is higher, since the
+login itself cannot be pre-warmed.
 
 ## Session reuse
 
