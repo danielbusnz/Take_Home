@@ -38,17 +38,18 @@ Done:
   MFA retry keeps the session, empty doc result -> 502, in-use/mismatched `warmId` handled,
   `fetchAndFinish` closes the browser on throw, `r.ok` checks on Browserbase fetches, `requireSession` guards.
 - Tests: `documents`, `http`, `sessions` (+ fetchAndFinish), `server` (endpoint integration via mock). 32 green.
-- **Latency: see `latency.md`.** Assurant ~7.8s (meets ~8s target). Allstate UI ~12s; a working
-  **full-API path on branch `allstate-api-experiment` is ~6-7s and reliable** (direct JSON endpoints).
+- **Latency: see `latency.md`.** Assurant ~7.8s (meets ~8s target). **Allstate on `main` is the
+  full-API path (~5.3s, direct JSON endpoints), with `GetUserData` + primer parallelized.** The
+  UI-navigation version (~12s) is kept on branch `allstate-ui-fallback` as a fallback.
 - Exports 1-5 in `~/Infer_notes` (this session = export-6). Deferred items in `known-issues.md`.
 
 Graded latency = "MFA submission -> document on screen" (`submitMfa` + `fetchDocuments`). Measure on
 prod (co-located). Allstate often skips MFA, so its graded span is mostly `fetchDocuments`.
 
 Next:
-- **Decide Allstate doc-fetch for `main`:** full-API (~6-7s, branch) vs hybrid vs current UI (~12s).
-  See `latency.md`; verify `page.request` source-IP on prod first.
-- **Redeploy `main` to prod** (prod is several commits behind `main`).
+- **Verify `page.request` source-IP on prod** (Fly datacenter IP). Full-API works from a residential
+  IP locally; confirm Allstate accepts the datacenter IP, else fall back to `allstate-ui-fallback`.
+- **Redeploy `main` to prod** (prod is several commits behind `main`, now full-API Allstate).
 - Deferred resilience: no request/operation timeout (`known-issues.md` #2).
 - README full version + Loom (remaining deliverables).
 - Smaller chaos/QA items: rate-limit `/prepare`, wire/throw `AntiBotError`/`CarrierTimeoutError`,
@@ -108,7 +109,8 @@ Use these specialized agents for the work they fit. Prefer them over writing bli
   password starts with `#`).
 - Anti-bot is priority #1: keep the residential proxy on; avoid `evaluate`-based fills
   (isTrusted:false -> Akamai flag) and aggressive parallelism.
-- Allstate's internal document JSON API works in-browser and is the big latency lever (~12s -> ~6-7s).
-  Cracked on branch `allstate-api-experiment`; full details + gotchas (CSRF must be
-  `decodeURIComponent(XSRF-TOKEN)`, the `GetDocumentsForPolicies` context primer, JSON-string body)
-  in `latency.md`. It is NOT anti-bot-gated (Akamai `_abck=-1` but `/api/secured` returns 200).
+- Allstate's internal document JSON API works in-browser and is the big latency lever (~12s -> ~5.3s);
+  it is the path on `main`. Full details + gotchas (CSRF must be `decodeURIComponent(XSRF-TOKEN)`,
+  the `GetDocumentsForPolicies` context primer, JSON-string body) in `latency.md`. It is NOT
+  anti-bot-gated (Akamai `_abck=-1` but `/api/secured` returns 200). The UI-nav fallback lives on
+  branch `allstate-ui-fallback`.

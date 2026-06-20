@@ -9,8 +9,17 @@ slower for CDP-heavy steps but identical for browser->carrier work.
 
 - **Assurant: ~7.8s graded.** Meets the target. Single download (Confirmation of Coverage),
   Cloudflare edge in Newark (close to us-east-1).
-- **Allstate (current `main`, UI navigation): ~12s doc stage** (range 12-17s, high variance).
-  Often skips MFA on a trusted device, so its graded span is mostly `fetchDocuments`.
+- **Allstate (current `main`, full-API): ~5.3s doc stage** (local run, 3 docs). The UI-navigation
+  version (~12s) is preserved on branch `allstate-ui-fallback`. Often skips MFA on a trusted
+  device, so its graded span is mostly `fetchDocuments`.
+
+### Allstate full-API doc-stage breakdown (local run, MFA skipped, 3 docs)
+| step | time | note |
+|---|---|---|
+| GetUserData + primer (parallel) | ~0.8s | the two independent GETs, fired together (was ~2.3s sequential) |
+| GetPolicySpecificDocsList | ~0.2s | the doc list |
+| GetUdpRetrieveDocument (parallel) | ~2.8s | one POST per doc, all overlapped; gated by the slowest single doc (server-side render variance, NOT size: a 9KB doc took 2.8s while a 1.24MB doc took 1.0s) |
+| **full `fetchDocuments`** | **~5.3s** | local; prod (Fly `iad`) should be similar or faster for the API round trips |
 
 ### Allstate doc-stage breakdown (prod, UI nav, 3 docs)
 | step | time | note |
@@ -30,9 +39,10 @@ slower for CDP-heavy steps but identical for browser->carrier work.
 - Parallelizing the trigger-download clicks (`noWaitAfter` + popup listener): only the first
   click sped up; the rest re-serialize on the page settling after each popup. No net win.
 
-## The big win (BRANCH `allstate-api-experiment`, not on main): full-API document fetch
+## The big win (now on `main`): full-API document fetch
 Fetch documents straight from Allstate's JSON API in-browser via `page.request`, skipping the
-UI nav, popups, and Browserbase download storage entirely. **Doc stage ~6-7s, reliable.**
+UI nav, popups, and Browserbase download storage entirely. **Doc stage ~5.3s.** The UI-navigation
+version is kept on branch `allstate-ui-fallback` as a fallback (most human-like footprint, ~12s).
 
 Endpoints (host `myaccountrwd.allstate.com`), all authenticated by the session cookies:
 1. `GET /api/secured/GetUserData` -> `policies[0].policyImage.number` (policy number).
@@ -62,11 +72,12 @@ Important findings from the probe:
   carrying the session cookies. Allstate accepts this (the endpoints check session + CSRF, not IP).
   Confirm on prod before relying on it.
 
-## Decision pending (next session)
-What goes on `main` for Allstate:
-- **full-API** (branch): ~6-7s, reliable, fastest, but the doc fetch is pure API calls.
-- **hybrid**: keep the human UI nav, then API-fetch only the PDFs (`GetUdpRetrieveDocument`); ~7-8s.
-- **UI-only** (current main): ~12s, most human-like footprint.
+## Decision (done)
+Allstate uses the **full-API** path on `main` (~5.3s). The `GetUserData` + primer parallelization
+is applied (~1.5s saved). Alternatives kept for reference:
+- **UI-only** (branch `allstate-ui-fallback`): ~12s, most human-like footprint, no source-IP question.
+- **hybrid**: keep the human UI nav, then API-fetch only the PDFs; ~7-8s. Not implemented.
 
-Lean: full-API, with the source-IP caveat verified on prod. The full-API also still has a small
-win left (run GetUserData and the GetDocumentsForPolicies primer in parallel, ~1.5s).
+Still open: verify the `page.request` **source IP** on prod (Fly datacenter IP, not the residential
+proxy). The API calls worked from a residential IP locally; confirm Allstate accepts the datacenter
+IP before relying on full-API in production. If it ever gets IP-walled, fall back to `allstate-ui-fallback`.

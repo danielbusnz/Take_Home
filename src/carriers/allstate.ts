@@ -88,45 +88,59 @@ export class AllstateCarrier implements Carrier {
     async fetchDocuments(): Promise<Document[]> {
         const session = requireSession(this.session);
         const page = session.page;
-        // navigate the way the UI does: Policies dropdown -> Documents.
-        // (a direct goto to the docs URL redirects back to the dashboard.)
+        // Fetch documents straight from Allstate's JSON API, in-browser via
+        // page.request (shares the session cookies + fingerprint), skipping the UI
+        // nav, popups, and Browserbase download storage entirely. See latency.md.
+        const api = page.request;
+        const origin = new URL(LOGIN_URL).origin;
         const tNav = Date.now();
-        await page
-            .getByRole("link", { name: /policies/i })
-            .or(page.getByRole("button", { name: /policies/i }))
-            .first()
-            .click();
-        await page.getByRole("button", { name: /Documents for .*policy/i }).first().click();
+        const xsrfCookie = (await page.context().cookies()).find((c) => c.name === "XSRF-TOKEN")?.value ?? "";
+        const headers = {
+            // Angular URL-decodes the XSRF-TOKEN cookie before sending the header;
+            // the raw (encoded) cookie makes the API 500.
+            "x-xsrf-token": decodeURIComponent(xsrfCookie),
+            "app-name": "MYA",
+            "x-efm": "true",
+            accept: "application/json, text/plain, */*",
+            "content-type": "application/json",
+            referer: `${origin}/secured/documents/policy-documents`,
+        };
 
-        // document titles are anchors inside the documents table
-        const titles = page.locator("table a:visible");
-        await titles.first().waitFor({ timeout: STEP_TIMEOUT });
-        const names = (await titles.allTextContents()).map((n) => n.trim());
-        console.log(`[timing] nav-docs: ${Date.now() - tNav}ms`);
+        const year = new Date().getFullYear();
+        // GetUserData (→ policy number) and the document-context primer don't depend
+        // on each other, so fire them together (saves ~1.5s vs sequential). The
+        // primer's body is empty but it scopes the session to the policy's docs;
+        // without it the list below comes back empty. The list call needs both done.
+        const [ud] = (await Promise.all([
+            api.get(`${origin}/api/secured/GetUserData`, { headers }).then((r) => r.json()),
+            api.get(`${origin}/api/secured/document/GetDocumentsForPolicies`, { headers }),
+        ])) as [{ policies?: { policyImage?: { number?: string } }[] }, unknown];
+        const policyNumber = ud.policies?.[0]?.policyImage?.number;
+        if (!policyNumber) throw new CarrierError("allstate: could not determine policy number");
 
-        // Clicking a title downloads its PDF into Browserbase's storage (via a
-        // popup). Capture the filename each click produces so we can pair the
-        // synced files back to their titles (filenames are opaque GUIDs).
-        const tClicks = Date.now();
-        // Click each doc and capture its popup (sequential clicks keep the
-        // popup-to-title pairing right), but await the downloads in PARALLEL so
-        // each popup fetching its PDF overlaps instead of stacking.
-        const filePromises: Promise<string>[] = [];
-        for (let i = 0; i < names.length; i++) {
-            const popupPromise = page.waitForEvent("popup", { timeout: STEP_TIMEOUT });
-            await titles.nth(i).click();
-            const popup = await popupPromise;
-            filePromises[i] = popup
-                .waitForEvent("download", { timeout: STEP_TIMEOUT })
-                .then((d) => d.suggestedFilename())
-                .catch(() => "");
-        }
-        const files = await Promise.all(filePromises);
-        console.log(`[timing] trigger-downloads: ${Date.now() - tClicks}ms`);
+        const listResp = await api.post(`${origin}/api/secured/document/GetPolicySpecificDocsList`, {
+            headers,
+            data: JSON.stringify({ policyNumber, contentId: null, yearFilter: year }),
+        });
+        const list =
+            ((await listResp.json()) as {
+                policySpecificDocumentsList?: { title: string; contentId: string; docYear: string }[];
+            }).policySpecificDocumentsList ?? [];
+        console.log(`[timing] api-list: ${Date.now() - tNav}ms (${list.length} docs)`);
 
-        // pair each captured filename to its title, then collect the bytes
-        const items = names.map((name, i) => ({ name, filename: files[i] }));
-        const docs = await session.collectDocuments(items);
+        // fetch every document's bytes in parallel straight from the JSON API
+        const tDocs = Date.now();
+        const docs = await Promise.all(
+            list.map(async (d) => {
+                const r = await api.post(`${origin}/api/secured/document/GetUdpRetrieveDocument`, {
+                    headers,
+                    data: JSON.stringify({ policyNumber, contentId: d.contentId, yearFilter: Number(d.docYear) || year }),
+                });
+                const dd = ((await r.json()) as { documentData?: { data?: string; mimeType?: string } }).documentData;
+                return { name: d.title, contentType: dd?.mimeType || "application/pdf", bytes: dd?.data ?? "" } satisfies Document;
+            }),
+        );
+        console.log(`[timing] api-docs: ${Date.now() - tDocs}ms`);
         return validateDocuments(this.name, docs);
     }
 
