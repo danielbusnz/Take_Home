@@ -26,23 +26,19 @@ export class BrowserbaseSession {
     ) {}
 
     // Open a session, connect over CDP, and enable downloads to BB cloud storage.
-    static async open(): Promise<BrowserbaseSession> {
+    // Per-carrier config: Allstate passes { verified, geo } (Verified fingerprint
+    // validates Akamai's _abck + a region-pinned IP for Okta); Assurant opts out
+    // (Cloudflare doesn't need Verified, and the extra weight slows its multi-step
+    // UI nav — its original ~7.8s used a plain residential proxy).
+    static async open(opts: { verified?: boolean; geo?: { country: string; state: string } } = {}): Promise<BrowserbaseSession> {
         const tCreate = Date.now();
         const session = await bb().sessions.create({
             projectId: process.env.BROWSERBASE_PROJECT_ID!,
-            // Verified (Scale plan): purpose-built Chromium with REAL fingerprints
-            // recognized as legitimate by Browserbase's bot-protection partners
-            // (Akamai/Cloudflare). Fixes the cloud tells (e.g. hardwareConcurrency)
-            // coherently — a real fingerprint, not a JS-masked one. Do NOT customize
-            // the viewport/UA here: Verified ignores viewport and the profiles are
-            // crafted as coherent wholes, so overriding only risks a mismatch. To
-            // change the profile, use `os` (e.g. "windows"|"mac"), not overrides.
-            browserSettings: { verified: true },
-            // residential egress, beats datacenter-IP anti-bot. Pin geolocation to
-            // the user's region (MA) so the egress IP is geo-consistent run to run,
-            // which lowers Okta "new location"/impossible-travel risk; Browserbase
-            // keeps one IP per session (sticky), so it won't rotate mid-flow.
-            proxies: [{ type: "browserbase", geolocation: { country: "US", state: "MA" } }],
+            ...(opts.verified ? { browserSettings: { verified: true } } : {}),
+            // residential egress beats datacenter-IP anti-bot. With a geo, pin to
+            // that region (Okta location consistency); else the default residential
+            // pool (lighter/faster for carriers that don't need the pin).
+            proxies: opts.geo ? [{ type: "browserbase", geolocation: { country: opts.geo.country, state: opts.geo.state } }] : true,
             region: "us-east-1", // co-locate near our compute; CDP RTT dominates per-action cost
             timeout: 1800, // seconds: covers the human MFA pause
         });

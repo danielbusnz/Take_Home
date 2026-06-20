@@ -19,7 +19,8 @@ export class AllstateCarrier implements Carrier {
     // Open the browser and load the login form. No credentials needed, so this
     // can run ahead of login() to pre-warm while the user is still typing.
     async prepare(): Promise<void> {
-        this.session = await BrowserbaseSession.open();
+        // Verified fingerprint (validates Akamai's _abck) + MA-pinned residential IP.
+        this.session = await BrowserbaseSession.open({ verified: true, geo: { country: "US", state: "MA" } });
         const page = this.session.page;
         // Kill CSS animations/transitions so Playwright's click "stability" waits
         // don't burn time. addInitScript re-applies on every navigation in the flow.
