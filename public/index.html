@@ -40,14 +40,19 @@
       let warmId = null;
       let preparing = null; // in-flight /prepare; login() awaits it so it never cold-starts
 
-      // Fill the carrier dropdown from the backend registry (its single source).
+      // Fill the carrier dropdown from the backend registry (its single source),
+      // then default to the first REAL carrier and pre-warm it the instant the
+      // page loads, so the cloud browser is already opening before the user types.
+      // The mock's prepare() is a no-op, so defaulting to it (registry order) would
+      // warm nothing and a fast submit would cold-start (~23s; see latency.md).
       async function loadCarriers() {
         try {
           const { carriers } = await (await fetch("/carriers")).json();
           $("carrier").innerHTML = carriers
             .map((c) => `<option value="${c}">${c}</option>`)
             .join("");
-          prepare(); // warm the default-selected carrier immediately on load
+          $("carrier").value = carriers.find((c) => c !== "mock") ?? carriers[0];
+          prepare(); // fire the pre-warm on load for the default real carrier
         } catch {
           $("status").textContent = "Could not load carriers. Is the server running?";
         }
@@ -66,6 +71,9 @@
           preparing = null;
           return;
         }
+        // surface the warm-up so the user has a reason not to submit into a cold
+        // session; cleared to "Ready" once the session is warm.
+        show("Preparing a secure session...");
         preparing = (async () => {
           try {
             const res = await fetch("/prepare", {
@@ -74,7 +82,10 @@
               body: JSON.stringify({ carrier }),
             });
             const data = await res.json();
-            if (res.ok) warmId = data.warmId;
+            if (res.ok) {
+              warmId = data.warmId;
+              show("Ready. Enter your credentials.");
+            }
           } catch {
             /* pre-warm is best-effort; login still works (just slower) without it */
           }
