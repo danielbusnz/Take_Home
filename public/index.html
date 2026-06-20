@@ -69,9 +69,8 @@
           preparing = null;
           return;
         }
-        // surface the warm-up so the user has a reason not to submit into a cold
-        // session; cleared to "Ready" once the session is warm.
-        show("Preparing a secure session...");
+        // pre-warm silently in the background; it overlaps the user typing, so there
+        // is no need to narrate it on screen.
         preparing = (async () => {
           try {
             const res = await fetch("/prepare", {
@@ -80,10 +79,7 @@
               body: JSON.stringify({ carrier }),
             });
             const data = await res.json();
-            if (res.ok) {
-              warmId = data.warmId;
-              show("Ready. Enter your credentials.");
-            }
+            if (res.ok) warmId = data.warmId;
           } catch {
             /* pre-warm is best-effort; login still works (just slower) without it */
           }
@@ -159,10 +155,7 @@
         submitAt = performance.now();
         // wait for any in-flight pre-warm so /login reuses the warm session instead of
         // cold-starting a second prepare.
-        if (preparing) {
-          show("Preparing session...");
-          await preparing;
-        }
+        if (preparing) await preparing;
         show("Logging in...");
         const r = await submitTo("/login", {
           carrier: $("carrier").value,
