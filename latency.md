@@ -1,147 +1,47 @@
-# Latency
+# Latency and anti-bot
 
-Graded metric: "MFA submission to document on screen" = `submitMfa` + `fetchDocuments`
-(logged as `GRADED mfa-submit->docs`; for the no-MFA path, `GRADED login->docs`). Target ~8s.
-Measure on prod (Fly `iad`, co-located with the Browserbase `us-east-1` session); local runs
-slower for CDP-heavy steps but identical for browser->carrier work.
+Graded metric: MFA submission to document on screen. On a trusted device (no MFA) that
+is the document fetch. Target ~8s. Measured on prod (Fly `iad`, co-located with
+Browserbase `us-east-1`).
 
-## Final shipped state (measured on prod, Allstate, trusted device)
+## Numbers (prod, Allstate)
 
-Two clocks, kept honest:
+- Graded fetch: **~6 to 8s**
+- Repeat run (session reuse): **~3s**
+- Full login-click to on screen: ~10 to 13s, including the ~4s credential login that
+  cannot be pre-warmed
 
-- **Graded span** (the brief's metric, MFA submission to document on screen; on a trusted
-  device it is the `fetchDocuments` span): **~6 to 8s.** Logged as `GRADED login->docs` /
-  `GRADED mfa-submit->docs`.
-- **Repeat run** (same credentials, session reuse): **~3s.** Logged as `GRADED reuse->docs`.
-- **Full login-click to documents on screen** (real UI, Playwright-driven): **~10 to 13s**,
-  because it includes the ~4s credential login that cannot be pre-warmed.
+The document fetch is dominated by the primer (`GetDocumentsForPolicies`, ~4 to 7s of
+server-side scoping). The document list is ~0.2s; the per-document fetches run in
+parallel, gated by the slowest (~2 to 5s of server-render variance).
 
-Two changes got it here:
+## What made it fast
 
-- **Pre-warm on page load.** The frontend fires `/prepare` the instant the page loads, so the
-  ~10s login-page open overlaps the user typing instead of sitting in the post-submit path. A
-  cold submit (no pre-warm) measured ~23s; pre-warmed is ~10-13s.
-- **Session reuse.** After a successful run the validated browser is kept alive, keyed by a
-  one-way hash of the credentials. A repeat login refetches on that live session and skips
-  prepare + login. The refetch is fast even though it re-runs the primer, because the kept-alive
-  session keeps Allstate's server session warm.
+- **Pre-warm on page load.** `/prepare` opens the browser when the page loads, so the
+  ~10s login-page open overlaps the user typing. Cold (no pre-warm) measured ~23s.
+- **Full-API document fetch.** Once authenticated, documents come from Allstate's JSON
+  API, skipping UI navigation and downloads (~12s to ~6s).
+- **Session reuse.** A repeat login refetches on the kept-alive validated session, ~3s.
+- **Co-location** (Browserbase `us-east-1` + Fly `iad`) cuts the CDP round-trip cost.
 
-The UI shows the graded span on screen (`documents fetched X.Xs`) next to the full login-click
-number, so the demo reports the brief's clock, not the inflated one.
+## Anti-bot
 
-## Where it stands
+Allstate = Akamai Bot Manager (the `/cwnbKR/` + `/akam/` sensor) + F5. The login runs
+Browserbase Verified (a real Windows/Chrome fingerprint) on a residential proxy with
+real trusted input, which validates Akamai's `_abck` to status 0. Confirmed with a
+fingerprint probe: the session passes the sensor, it does not merely ride unenforced
+endpoints.
 
-- **Assurant: ~7.8s graded.** Meets the target. Single download (Confirmation of Coverage),
-  Cloudflare edge in Newark (close to us-east-1).
-- **Allstate (current `main`, full-API): ~5.3s doc stage** (local run, 3 docs). The UI-navigation
-  version (~12s) is preserved on branch `allstate-ui-fallback`. Often skips MFA on a trusted
-  device, so its graded span is mostly `fetchDocuments`.
+The latency-vs-detection tradeoff, decided per carrier:
 
-### Allstate full-API doc-stage breakdown (local run, MFA skipped, 3 docs)
-| step | time | note |
-|---|---|---|
-| GetUserData + primer (parallel) | ~0.8s | the two independent GETs, fired together (was ~2.3s sequential) |
-| GetPolicySpecificDocsList | ~0.2s | the doc list |
-| GetUdpRetrieveDocument (parallel) | ~2.8s | one POST per doc, all overlapped; gated by the slowest single doc (server-side render variance, NOT size: a 9KB doc took 2.8s while a 1.24MB doc took 1.0s) |
-| **full `fetchDocuments`** | **~5.3s** | local; prod (Fly `iad`) should be similar or faster for the API round trips |
+- **Allstate** fetches documents with `page.request` (a datacenter-IP Node client).
+  Akamai gates `/api/secured` on the validated session cookie, not per-request IP, so
+  this rides a legitimate session and is fast. The byte-fetch egresses our datacenter
+  IP on a validated session, a documented residual.
+- **Assurant** stays in-page (`fetch` inside the browser) because Cloudflare re-scores
+  every request, so it keeps the residential IP and real Chrome TLS.
 
-### Allstate doc-stage breakdown (prod, UI nav, 3 docs)
-| step | time | note |
-|---|---|---|
-| nav-docs | ~6.4s | Policies dropdown -> Documents -> wait for table; `wait-table` alone ~3.3s (server fetch + render). Pure browser->carrier; co-location doesn't help. |
-| trigger-downloads | ~4.2s | one popup + PDF download per doc, clicked sequentially; the downloads overlap (~0.4s), the clicks serialize |
-| retrieve-list | ~0.3-2s | poll the Browserbase Downloads API |
-| fetch-bytes | ~0.7s | pull each PDF's base64 (already parallel) |
-
-## Already done
-- **Co-location** (Browserbase `us-east-1` + Fly `iad`). The big CDP-round-trip win.
-- **Pre-warm** (`/prepare`): session create + login page load happen before the graded span.
-- **Killed CSS animations** (addInitScript) so click "stability" waits don't burn time.
-- **Parallelized `fetch-bytes`** (`collectDocuments`, Promise.all).
-
-## Tried and reverted
-- Parallelizing the trigger-download clicks (`noWaitAfter` + popup listener): only the first
-  click sped up; the rest re-serialize on the page settling after each popup. No net win.
-
-## The big win (now on `main`): full-API document fetch
-Fetch documents straight from Allstate's JSON API from INSIDE the page (`session.fetchInPage`,
-which runs `fetch()` via `page.evaluate`), skipping the UI nav, popups, and Browserbase download
-storage entirely. **Doc stage ~5.3s.** The UI-navigation version is kept on branch
-`allstate-ui-fallback` as a fallback (most human-like footprint, ~12s).
-
-Why in-page `fetch` and not `page.request`: `page.request` is a Node HTTP client, so it egresses
-from our process (a Fly datacenter IP) with a Node/undici TLS fingerprint that does not match the
-Chrome UA it sends. An in-page `fetch` rides the browser's residential-proxy IP, real Chrome TLS,
-and cookies, so the API call looks like the app's own XHR. See the fingerprint notes below.
-
-Endpoints (host `myaccountrwd.allstate.com`), all authenticated by the session cookies:
-1. `GET /api/secured/GetUserData` -> `policies[0].policyImage.number` (policy number).
-2. `GET /api/secured/document/GetDocumentsForPolicies` -> **context primer**. Its own body is
-   empty (`policyDocs:null`) but calling it scopes the session to the policy's documents. WITHOUT
-   this call, step 3 returns an empty list. This was the whole blocker.
-3. `POST /api/secured/document/GetPolicySpecificDocsList` body
-   `{policyNumber, contentId:null, yearFilter}` -> `[{title, contentId, docYear}]`.
-4. `POST /api/secured/document/GetUdpRetrieveDocument` body `{policyNumber, contentId, yearFilter}`
-   -> `documentData.{data (base64 PDF), mimeType, fileName}`. Fire these in parallel.
-
-Two gotchas that cost hours:
-- **CSRF:** `x-xsrf-token` must be `decodeURIComponent(XSRF-TOKEN cookie)`. The raw (URL-encoded)
-  cookie value 500s ("Unsuccessful service call"); the decoded value matches what Angular sends.
-- **POST body** must be a JSON string (`JSON.stringify(...)`), not a Playwright `data` object,
-  or the server receives a null body.
-- Load-bearing headers we send: `app-name: MYA`, `x-efm: true`, `content-type: application/json`,
-  plus the decoded `x-xsrf-token`. NOTE: the real app's HTTP interceptor also attaches correlation
-  IDs (`x-sid/x-vid/x-iid/x-tid`) to these calls; we omit them because the API still answers without
-  them, but that means our request header set is a minimal, distinctive subset of the app's, which is
-  itself a fingerprint difference. Replaying the full captured header set would be more faithful.
-
-Anti-bot characterization:
-- **Allstate = Akamai Bot Manager (the `/cwnbKR/<obf>` + `/akam/13/pixel_*` sensor) + F5 BIG-IP.**
-  The sensor JS collects a device + behavioral fingerprint and POSTs encrypted `sensor_data` (we saw
-  4 POSTs, ~1.9-4KB, as it gathered signal). F5 `BIGipServer*` cookies are load-balancer affinity,
-  not bot detection; `conacc.allstate.com` (IBM Security Access Manager) is the auth backend.
-- **Akamai VALIDATES us under the hardened config (`_abck` status=0).** Measured with a fingerprint
-  probe (`scripts/allstate-fp-attack-probe.ts`): with Browserbase **Verified** (a real Windows/Chrome
-  fingerprint Akamai's partners recognize) + the MA residential proxy + real trusted Playwright input,
-  the sensor POSTs return **201** with `x-akamai-transformed: 0 - 0 -` and `_abck` validates to
-  `status=0` on first load and stays validated. So the full-API session rides a *validated* Akamai
-  session — we pass the sensor, we don't merely ride unenforced endpoints.
-- **History:** before the Verified hardening (a vanilla Linux session), `_abck` stayed `~-1~`
-  (unvalidated). The fix was Verified + residential + trusted interaction, not a flag. If a future
-  session ever shows `_abck` status `-1` again, treat the full-API path as at risk and fall back to
-  the UI path. The earlier 500s were app-level (bad CSRF token), not a bot wall.
-- **Source IP: resolved.** Because the doc calls now run in-page (`fetchInPage`), they egress from
-  the residential proxy IP, not our datacenter IP. (Verified against our own echo server: an in-page
-  `fetch` shows the residential IP in `x-forwarded-for`; `page.request` shows our process IP.)
-  `page.request` puts the datacenter IP + Node TLS on the byte-fetch — acceptable for **Allstate**
-  (Akamai gates on the validated session cookie, not per-request IP; see Decision), NOT for
-  **Assurant** (Cloudflare re-scores every request), which stays in-page.
-
-## Decision (done)
-**Latency vs anti-bot tradeoff, decided per carrier:**
-- **Allstate → `page.request` (datacenter, fast).** In-page `fetch` measured ~10.4s graded on prod
-  (residential proxy + `page.evaluate`/base64-over-CDP, esp. a 1.24MB PDF at ~3.2s). `page.request`
-  rides the **Akamai-validated session** (`_abck=0` earned by the residential+Verified login, carried
-  on the request cookies) + CSRF; Akamai gates `/api/secured` on the session, not per-request IP, so
-  the fast path stays legitimate. Targets ~5s (no-MFA) / ~6.7s (MFA), under the 8s requirement. The
-  documented residual: the byte-fetch egresses our datacenter IP on a validated session.
-- **Assurant → in-page `fetch` (residential).** Cloudflare re-scores per request, so datacenter
-  `page.request` is riskier there; Assurant's docs are small, so in-page is already fast enough.
-- `GetUserData` + primer run in parallel (~1.5s saved) on both.
-
-Alternatives kept for reference:
-- **UI-only** (branch `allstate-ui-fallback`): ~12s, most human-like footprint.
-- **hybrid**: human UI nav to the documents page (validates the session + makes request ordering /
-  referer / sec-fetch match a real user), then in-page API fetch of the PDFs; ~7-8s. Not implemented.
-
-Known residual bot tells (see the pentest notes; acceptable for a demo, would harden for production):
-- Parallel burst: all `GetUdpRetrieveDocument` calls fire at once via `Promise.all` (now with a small
-  random `jitter`), still an unhuman cadence vs a real user clicking docs. The hybrid + serialized
-  fetches would fix it, at a few seconds' latency cost.
-- Minimal/curated header set vs the app's full set (above).
-- Fingerprint: we run Browserbase **Verified** (real Windows/Chrome profile) and do NOT JS-override
-  navigator values — Verified's coherent fingerprint is what validates `_abck` (see above), so masking
-  on top would only reintroduce a tell.
-RESOLVED (was the main latent risk): `_abck` now validates (status=0) under the hardened config.
-If the full-API path ever gets walled, fall back to the **UI** path (`allstate-ui-fallback`), never
-to a `page.request` datacenter-IP client.
+Residual tells, acceptable for a demo, would harden for production: a minimal request
+header set vs the app's full set, and a parallel document-fetch burst faster than a
+human clicking. If the full-API path is ever walled, the fallback is the UI-navigation
+path (slower, most human-like).
