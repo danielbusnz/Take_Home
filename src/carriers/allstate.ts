@@ -36,6 +36,14 @@ export class AllstateCarrier implements Carrier {
         // open the Email tab now (no credentials needed) so login() only types + submits
         await page.locator("#UserIDdisplay").click();
         await page.locator("#emailAddress").waitFor({ timeout: STEP_TIMEOUT });
+        // Pre-warm the API origin's TCP+TLS connection (page.request shares one
+        // undici pool across prepare -> fetchDocuments). Fires unauthenticated (the
+        // 401/403 is discarded); we only want a warm keep-alive connection sitting
+        // in the pool so the first real API calls aren't cold (~1.2s saved). Not
+        // awaited, so it races while the user types. See latency.md.
+        page.request
+            .get(`${new URL(LOGIN_URL).origin}/api/secured/GetUserData`, { headers: { "app-name": "MYA", "x-efm": "true" } })
+            .catch(() => {});
     }
 
     async login(username: string, password: string): Promise<{ mfaRequired: boolean }> {
@@ -146,7 +154,7 @@ export class AllstateCarrier implements Carrier {
         const tDocs = Date.now();
         const docs = await Promise.all(
             list.map(async (d, i) => {
-                await jitter(700); // stagger starts so the doc fetches aren't a single-ms burst
+                await jitter(100); // small stagger only; page.request is session-gated, not cadence-scored
                 return timed(`GetUdpRetrieveDocument[${i}] ${d.title.slice(0, 24)}`, async () => {
                     const j = (await postJson(`${origin}/api/secured/document/GetUdpRetrieveDocument`, {
                         policyNumber,
