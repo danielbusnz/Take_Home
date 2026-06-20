@@ -56,6 +56,18 @@ app.post("/login", async (req, res) => {
     // reuse a ready pre-warmed session if the client supplied one; else go fresh
     const warmId = typeof req.body.warmId === "string" ? req.body.warmId : undefined;
     const warm = warmId ? sessions.get(warmId) : undefined;
+
+    // a supplied warmId that is no longer WARM means it is already being driven by
+    // a concurrent or replayed /login; reject rather than open a second browser.
+    if (warm && warm.state !== "WARM") {
+        return res.status(409).json({ error: "session already in use" });
+    }
+    // a warm session warmed for a different carrier is dead weight now (the user
+    // switched); free its browser instead of orphaning it until the reaper.
+    if (warm && warm.carrier.name !== carrierName) {
+        await cleanup(warmId!);
+    }
+
     let sessionId: string;
     let session: Session;
     // only reuse a warm session that was warmed for THIS carrier

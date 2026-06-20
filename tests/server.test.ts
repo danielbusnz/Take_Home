@@ -120,6 +120,16 @@ test("POST /mfa on a session not awaiting MFA is 409", async () => {
     assert.equal(status, 409);
 });
 
+test("a warmId already in use rejects a second login with 409", async () => {
+    const warm = await post("/prepare", { carrier: "mock" });
+    // first login claims the warm session and advances it to AWAITING_MFA
+    const first = await post("/login", { carrier: "mock", username: "dave", password: "p", warmId: warm.body.warmId });
+    assert.equal(first.body.status, "mfa_needed");
+    // a second login on the same warmId must not spawn a second session
+    const second = await post("/login", { carrier: "mock", username: "dave", password: "p", warmId: warm.body.warmId });
+    assert.equal(second.status, 409);
+});
+
 test("pre-warm then login reuses the warm session", async () => {
     const warm = await post("/prepare", { carrier: "mock" });
     assert.equal(warm.status, 200);
