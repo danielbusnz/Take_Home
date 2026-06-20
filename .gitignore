@@ -9,3 +9,7 @@ build/
 
 # dev-only spikes and artifacts, never ship
 scripts/
+
+# local working notes, not shipped
+LOOM.md
+CLAUDE.md
