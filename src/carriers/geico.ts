@@ -27,8 +27,8 @@ function stagger(floorMs: number, rangeMs: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, floorMs + Math.random() * rangeMs));
 }
 
-// Full REN is "REN" + 11 digits (e.g. REN66501720005). The short 7-digit form
-// (REN6650172, shown as selection-page text) is not what the document API uses;
+// Full REN is "REN" + 11 digits (e.g. REN12345678901). The short 7-digit form
+// (REN1234567, shown as selection-page text) is not what the document API uses;
 // we require >= 10 digits after the prefix to keep only the full form.
 const FULL_REN_RE = /REN\d{10,}/i;
 
@@ -49,7 +49,7 @@ function extractRen(raw: string): string | null {
             for (const key of ["PolicyId", "policyId", "policyNumber", "id", "Id", "renNumber"]) {
                 const val = obj[key];
                 if (typeof val === "string") {
-                    // Could be "REN66501720005" or "66501720005" (bare digits)
+                    // Could be "REN12345678901" or "12345678901" (bare digits)
                     const withPrefix = /^REN/i.test(val) ? val.toUpperCase() : `REN${val}`;
                     if (FULL_REN_RE.test(withPrefix)) return withPrefix;
                 }
