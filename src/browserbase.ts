@@ -23,7 +23,7 @@ export class BrowserbaseSession {
         private readonly browser: Browser,
         readonly page: Page,
         readonly id: string,
-    ) {}
+    ) { }
 
     // Open a session, connect over CDP, and enable downloads to BB cloud storage.
     // Per-carrier config: Allstate passes { verified, geo } (Verified fingerprint
@@ -169,7 +169,7 @@ export async function step<T>(page: Page, name: string, fn: () => Promise<T>): P
     } catch (e) {
         if (e instanceof CarrierError) throw e; // intentional errors pass through
         console.error(`${name} failed:`, e);
-        await page.screenshot({ path: `/tmp/carrier-fail-${name.replace(/\W+/g, "-")}.png` }).catch(() => {});
+        await page.screenshot({ path: `/tmp/carrier-fail-${name.replace(/\W+/g, "-")}.png` }).catch(() => { });
         throw new CarrierError(`${name} failed`);
     }
 }
